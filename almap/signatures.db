@@ -1,0 +1,22 @@
+# signatures.db - ALmap v3.0 default service signature database.
+# Format: TYPE|<port_or_any>|<pattern_to_match>|<service_name>
+# - TYPE is EXACT (literal substring) or REGEX (POSIX extended regex).
+# - Blank lines and lines starting with # are ignored.
+# - <port_or_any> is "any" or a port 1..65535.
+# - Patterns are 1..255 bytes and may contain '|'; the last '|'
+#   separator ends the pattern.
+# - <service_name> is printable ASCII without '|' or spaces.
+# - First match wins, in file order. Invalid lines are skipped.
+# Install a custom database at ~/.almap/signatures.db (the default
+# lookup path) or pass --sigdb <path> with --service.
+# MySQL is not expressible as a portable text signature (its signature
+# is the protocol byte 10 at offset 4) so it stays hardcoded in
+# modules/service.goose.
+# tools/import_nmap.py converts nmap-service-probes into this format.
+
+EXACT|80|Server:|http
+EXACT|8080|Server:|http
+EXACT|8000|Server:|http
+REGEX|any|^SSH-[0-9]+\.[0-9]+-|ssh
+EXACT|any|SMTP|smtp
+EXACT|any|220|ftp

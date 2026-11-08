@@ -1,0 +1,6 @@
+# almap-autopilot bundle patch: inserts the plugin into the profile tree.
+# The host half registers the four autonomous tools, the /almap command and the
+# status endpoint; the client half registers the sidebar entry and control panel.
+- insert:
+    - id: almap-autopilot
+      name: "@local/almap-autopilot"

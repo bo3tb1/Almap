@@ -1,0 +1,8 @@
+{
+  "meta": {
+    "title": "ALmap Autopilot",
+    "description": "Autonomous build, test, and self-heal controls for the ALmap Goose + C project, with the four autopilot tools and a left sidebar control center."
+  },
+  "panel": "ALmap Autopilot",
+  "panel.description": "Build, test, and self-heal ALmap without human intervention."
+}

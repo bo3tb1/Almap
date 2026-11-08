@@ -1,0 +1,6 @@
+// almap.build - Goose sidecar for the program's own C sources.
+// A program lists its C in foo.build beside foo.goose; both goose run
+// and goose build compile it, so a later extern fn can call it.
+
+c_sources = ["c/net.c", "c/net6.c", "c/raw.c", "c/icmp.c", "c/pool.c", "c/udp.c", "c/os.c", "c/osdb.c", "c/async.c", "c/alscript.c", "c/sigdb.c", "c/http.c"];
+c_libs_linux = ["pthread", "dl"];
