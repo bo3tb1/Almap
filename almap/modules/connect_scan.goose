@@ -45,7 +45,7 @@ extern fn almap_connect_scan_host(addr_be: u32, ports: const i32&, port_count: i
 // max_concurrent bounds in-flight sockets and rate_per_sec is a token
 // bucket (0 = unlimited). Both pointers use the verified first-element
 // reference form (const u32& / u8&) so Goose passes raw C pointers.
-extern fn almap_async_connect_scan(hosts_be: const u32&, host_count: i32, ports: const i32&, port_count: i32, timeout_ms: i32, max_concurrent: i32, rate_per_sec: i32, states_out: u8&) -> i32;
+extern fn almap_async_connect_scan(hosts_be: const u32&, host_count: i32, ports: const i32&, port_count: i32, timeout_ms: i32, max_concurrent: i32, retries: i32, rate_per_sec: i32, states_out: u8&) -> i32;
 extern fn almap_async_errno_state(err: i32) -> i32;
 
 // Pure wrappers over the C state mapping and the fast-path batch
@@ -457,7 +457,7 @@ fn scan_connect_parallel(targets: target::TargetList, ports: target::PortRanges,
 // the sequential and pthread-pool paths. Banners and service detection
 // are rejected by the CLI (this engine scans connect results only), and
 // IPv6 is rejected before this path runs.
-fn scan_connect_fast(targets: target::TargetList, ports: target::PortRanges, timeout_ms: i64, json: bool, table: bool, xml: bool, rate_per_sec: i64) -> bool {
+fn scan_connect_fast(targets: target::TargetList, ports: target::PortRanges, timeout_ms: i64, retries: i64, json: bool, table: bool, xml: bool, rate_per_sec: i64) -> bool {
     var flat: i32[65536] = [0; 65536];
     let pcount, pok = expand_ports(ports, flat[..]);
     if !pok {
@@ -495,7 +495,7 @@ fn scan_connect_fast(targets: target::TargetList, ports: target::PortRanges, tim
                 hi++;
             }
             let jobs = bcount * pcount;
-            let rc = almap_async_connect_scan(hosts_buf[0], bcount as i32, flat[0], pcount as i32, timeout_ms as i32, fast_max_concurrent(jobs), rate_per_sec as i32, states_buf[0]);
+            let rc = almap_async_connect_scan(hosts_buf[0], bcount as i32, flat[0], pcount as i32, timeout_ms as i32, fast_max_concurrent(jobs), retries as i32, rate_per_sec as i32, states_buf[0]);
             if rc != 0 {
                 if xml { output::xml_end_scan(); } else if !table { output::end(json); }
                 print("error: async connect engine failed");

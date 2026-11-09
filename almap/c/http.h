@@ -45,7 +45,7 @@ extern "C" {
  *
  * almap_http_run_scan(targets, ports, scan_type, fast, os_flag,
  *                     service_flag, evasion_flag, discover_flag,
- *                     timeout_ms, script, out, cap, exit_code):
+ *                     timeout_ms, retries, script, out, cap, exit_code):
  *   Spawns the ALmap binary (self exe) as a child with --json and
  *   captures combined stdout+stderr into out NUL-terminated. Returns
  *   the output byte count (>= 0) or -1 on fork/exec/pipe failure.
@@ -60,6 +60,8 @@ extern "C" {
  *                nonzero means add the corresponding flag
  *                (--fast, --os, --service, -f, --discover)
  *     timeout_ms  when > 0, passes --timeout <ms>
+ *     retries    when >= 0, passes --retries <n> (fast engine timeout
+ *                retries, CLI range 0..10)
  *     script     AlScript .so path; empty/NULL means no --script
  *
  * All functions are thread-unsafe only in that the server is
@@ -78,7 +80,7 @@ int almap_http_self_exe(unsigned char *buf, int cap);
 int almap_http_run_scan(const char *targets, const char *ports,
                         const char *scan_type, int fast, int os_flag,
                         int service_flag, int evasion_flag,
-                        int discover_flag, int timeout_ms,
+                        int discover_flag, int timeout_ms, int retries,
                         const char *script,
                         unsigned char *out, int cap, int *exit_code);
 

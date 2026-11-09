@@ -1,4 +1,4 @@
-# ALmap v4.0
+# ALmap v5.0
 
 **A modern, high-performance network scanner for Linux, written in
 [Goose](https://github.com/wouteravgo/goose) with a C data plane.**
@@ -11,17 +11,22 @@ sockets, raw packets, threads, `dlopen`, and POSIX regex.
 
 High-performance Nmap alternative featuring an async engine, evasion controls, C plugins, a Regex DB for service detection, and an OS DB for fingerprinting.
 
-## Killer Features (V4.0)
+## Killer Features (V5.0)
 
-ALmap V4.0 matches and exceeds Nmap's core engineering with a tiny,
-auditable, Linux-native core and a full Nmap-scale data plane.
+ALmap V5.0 matches and exceeds Nmap's core engineering with a tiny,
+auditable, Linux-native core and a full Nmap-scale data plane, plus
+resilient scanning and deep application-protocol coverage.
 
-- **Async epoll engine (`--fast`).** One non-blocking `epoll` loop
-  keeps up to 10,000 TCP connects in flight, paced by a token-bucket
-  rate limiter. The fastest unprivileged scan path; ideal for /24s.
+- **Async epoll engine (`--fast`) with timeout retries.** One
+  non-blocking `epoll` loop keeps up to 10,000 TCP connects in flight,
+  paced by a token-bucket rate limiter. `--retries <n>` (0..10,
+  default 3) gives each timed-out connect up to `n` additional
+  attempts with a fresh deadline, so a lossy path does not turn open
+  ports into false negatives. The fastest unprivileged scan path;
+  ideal for /24s, Wi-Fi, and long-haul links.
   ```sh
-  # Copy-paste: async scan a /24, 500ms timeout, 1024 ports
-  ./almap -t 192.168.1.0/24 -p 1-1024 --scan connect --fast --timeout 500
+  # Copy-paste: async scan a /24, 500ms timeout, 3 retries
+  ./almap -t 192.168.1.0/24 -p 1-1024 --scan connect --fast --timeout 500 --retries 3
   ```
 - **Advanced OS Fingerprinting (T1-T7 + U1).** After the SYN scan,
   `--os` sends the Nmap-style probe sequence (T1 `SYN` open, T2 `NULL`
@@ -47,18 +52,23 @@ auditable, Linux-native core and a full Nmap-scale data plane.
   sudo ./almap -t 192.168.1.10 -p 80 --scan syn -D 10.0.0.1,10.0.0.2
   sudo ./almap -t 192.168.1.10 -p 80 --scan syn --spoof-mac aa:bb:cc:dd:ee:ff
   ```
-- **AlScript C plugins (no VM, no Lua).** Ordinary `.so` files
-  exporting `int almap_script_run(AlScriptContext*)`, run in-process
-  with full privileges. V4 ships a 5-script arsenal inspired by NSE:
-  `http_title`, `ftp_anon`, `ssh_version`, `http_methods`,
-  `redis_info` (plus `sample_banner`).
+- **20 built-in AlScript C plugins (no VM, no Lua).** Ordinary `.so`
+  files exporting `int almap_script_run(AlScriptContext*)`, run
+  in-process with full privileges. V5 ships deep application-protocol
+  probes for HTTP, SSH, FTP, SMTP, Telnet, Redis, MySQL, MongoDB, SMB,
+  DNS, SNMP, RDP, VNC, NTP, LDAP, SIP, IKE/IPsec, and WebDAV.
   ```sh
-  # Copy-paste: build the arsenal and scan with a script
+  # Copy-paste: build the full plugin arsenal
   bash tools/build_plugins.sh
-  ./almap -t 127.0.0.1 -p 80 --scan connect --script ./plugins/http_title.so
-  ./almap -t 127.0.0.1 -p 22 --scan connect --script ./plugins/ssh_version.so --json
-  ./almap -t 127.0.0.1 -p 21 --scan connect --script ./plugins/ftp_anon.so
+  # Inspect HTTP, SSH, and SMB services
+  ./almap -t 127.0.0.1 -p 80 --scan connect --script ./plugins/http_server_headers.so
+  ./almap -t 127.0.0.1 -p 22 --scan connect --script ./plugins/ssh_hostkey.so --json
+  ./almap -t 127.0.0.1 -p 445 --scan connect --script ./plugins/smb_version.so
   ```
+- **Resilient complex-network scanning.** Per-attempt deadlines,
+  bounded worker pools, adaptive `--fast` retries, and protocol probes
+  that parse structured responses make ALmap usable on lossy wireless,
+  NAT, VPN, and cloud paths instead of only on a clean LAN.
 - **Full Nmap DB import (no limits).** The service DB (8k+ entries)
   and OS DB (1k+ unique of 6,100 Fingerprints) live in a dynamic C
   `malloc`/`realloc` hash table (16k buckets). 10,000-entry / 1,000-
@@ -71,13 +81,14 @@ auditable, Linux-native core and a full Nmap-scale data plane.
   ```
 - **Native C Web UI (Zenmap Killer).** Dark-mode SPA served by raw
   POSIX sockets (no mongoose/libmicrohttpd), embedded HTML/CSS/JS.
-  API: `GET /api/status`, `POST /api/scan` (with `script` field).
+  API: `GET /api/status`, `POST /api/scan` (with `script` and `retries`
+  fields).
   ```sh
   # Copy-paste: launch the Web UI on 8080
   ./almap --web
   curl http://127.0.0.1:8080/api/status
   curl -X POST http://127.0.0.1:8080/api/scan -H 'Content-Type: application/json' \
-    -d '{"targets":"127.0.0.1","ports":"80,443","scan_type":"connect","script":"plugins/http_title.so"}'
+    -d '{"targets":"127.0.0.1","ports":"80,443","scan_type":"connect","fast":true,"retries":5}'
   ```
 
 
@@ -120,16 +131,17 @@ auditable, Linux-native core and a full Nmap-scale data plane.
 
 ## Feature comparison
 
-| Capability | ALmap v4.0 | Nmap |
+| Capability | ALmap v5.0 | Nmap |
 | --- | --- | --- |
 | TCP connect / SYN / UDP scans | Yes | Yes |
 | Asynchronous connect engine | Yes: `--fast`, up to 10,000 in flight | Yes, different engine |
+| Timeout retries | Yes: `--retries 0..10` (default 3) | Yes: `--max-retries` |
 | Host discovery | TCP ping + optional ICMP echo | Broad |
 | Multiple targets / CIDR | `-t`, `-iL`, IPv4 `/24`–`/32`, IPv6 `/112`–`/128` | Broad |
 | IPv6 | Connect and discovery only | Broad |
 | Service detection | Built-in heuristics + full Nmap Regex DB (hash table, 8k+ entries) | Large probe database |
 | OS fingerprinting | T1-T7+U1 probe signature + TTL/window/IPID/ISN/options + DB | Deep fingerprint database |
-| Scripting | AlScript native C plugins | NSE (Lua) |
+| Scripting | 20 built-in AlScript native C plugins | NSE (Lua) |
 | Evasion | Fragmentation, MTU, decoys, MAC spoofing | Broader set |
 | Output | Text, JSON, table, XML | Text, XML, grepable |
 | Platforms | Linux (POSIX) | Cross-platform |
@@ -159,7 +171,7 @@ goose build almap.goose --cc gcc -o almap
 ./almap --help
 ```
 
-The first line of `--help` should read `ALmap v4.0.0 - modular network
+The first line of `--help` should read `ALmap v5.0.0 - modular network
 scanner`. If Goose cannot find its standard library, pass
 `--stdlib /path/to/stdlib` or keep `GOOSE_STDLIB` exported for every
 Goose command.
@@ -193,7 +205,7 @@ sudo ./almap -t 192.168.1.10 -p 53,123,161 --scan udp
 
 Run `./almap --help` for the complete flag list and validation rules.
 Defaults: `--scan connect`, `--timeout 1000`, `--workers 10`,
-`--rate 0` (unlimited).
+`--retries 3` (`--fast` only), `--rate 0` (unlimited).
 
 ## Feature guide
 
@@ -210,6 +222,10 @@ Defaults: `--scan connect`, `--timeout 1000`, `--workers 10`,
 - **`--fast`** uses the asynchronous `epoll` connect engine. It is
   IPv4, connect-only, and cannot be combined with banners, service
   detection, scripting, evasion, or `--os`.
+- **`--retries 0..10`** sets how many additional attempts a `--fast`
+  connect gets after its first timeout (default 3). Each retry starts
+  with a fresh deadline; `--retries 0` disables retries. The flag is
+  validated for every scan but only the async engine consumes it.
 - **`--workers 2..1000`** enables the bounded pthread pool for
   connect, SYN, and discovery paths. Ports are capped at 4,096 per
   worker-pool batch; `--fast` ignores `--workers`.
@@ -398,6 +414,22 @@ sudo ./almap -t 127.0.0.1 -p 80 --scan syn \
     --script ./sample_banner.so --json
 ```
 
+The 20 built-in protocol scripts are:
+
+| Area | Scripts |
+| --- | --- |
+| Web / HTTP | `http_server_headers`, `http_robots`, `http_options`, `http_webdav` |
+| Remote access | `ssh_hostkey`, `telnet_banner`, `rdp_info`, `vnc_auth` |
+| File and mail | `ftp_syst`, `smb_version`, `smtp_commands` |
+| Databases | `redis_info`, `mysql_version`, `mongodb_info` |
+| Infrastructure | `dns_version`, `snmp_sysdescr`, `ntp_version`, `ldap_rootdse`, `sip_options`, `ike_version` |
+
+`plugins/sample_banner.c` remains the minimal template. The engine
+runs a plugin only against ports the scan already reports open, so use
+`--scan connect` or `--scan syn`; a plugin may open its own TCP or UDP
+sockets for multi-step protocol handshakes. Build everything with
+`bash tools/build_plugins.sh`.
+
 Plugins run in-process with full privileges, no sandbox, and no
 timeout isolation beyond the context's `timeout_ms`. Output is capped
 at 1023 bytes. Load only plugins you trust.
@@ -436,16 +468,16 @@ generation, JSON parsing, and validation, mirroring the CLI rules.
 Then open `http://127.0.0.1:8080/` in a browser. The page has a form
 for targets and ports, a scan-type select (Connect, SYN, UDP,
 Discovery), toggles for Fast (async engine), OS fingerprinting,
-Service detection, and Evasion, a timeout field, and a terminal-like
-output window. It polls `GET /api/status` on load and `POST /api/scan`
-on submit.
+Service detection, and Evasion, timeout and retry fields, an AlScript
+picker, and a terminal-like output window. It polls `GET /api/status`
+on load and `POST /api/scan` on submit.
 
 ### API
 
 ```sh
 # Health check.
 curl http://127.0.0.1:8080/api/status
-# {"status":"ok","version":"4.0.0","service":"almap-web"}
+# {"status":"ok","version":"5.0.0","service":"almap-web"}
 
 # Connect scan: returns ALmap's --json output.
 curl -X POST http://127.0.0.1:8080/api/scan \
@@ -456,13 +488,14 @@ curl -X POST http://127.0.0.1:8080/api/scan \
 curl -X POST http://127.0.0.1:8080/api/scan -H 'Content-Type: application/json' \
   -d '{"targets":"192.168.1.0/24","scan_type":"discovery","timeout":500}'
 curl -X POST http://127.0.0.1:8080/api/scan -H 'Content-Type: application/json' \
-  -d '{"targets":"127.0.0.1","ports":"80","scan_type":"connect","fast":true}'
+  -d '{"targets":"127.0.0.1","ports":"80","scan_type":"connect","fast":true,"retries":5}'
 ```
 
 `POST /api/scan` accepts `targets` (required), `ports` (required
 unless discovery), `scan_type` (`connect` default, `syn`, `udp`,
-`discovery`), `fast`, `os`, `service`, `evasion`, `discover`, and
-`timeout` (ms). It validates flag combinations exactly like the CLI
+`discovery`), `fast`, `os`, `service`, `evasion`, `discover`,
+`timeout` (ms), `retries` (0..10, default 3), and `script` (an
+AlScript `.so` path). It validates flag combinations exactly like the CLI
 (for example, `fast` needs `connect`, `os` needs `syn`) and spawns
 the ALmap binary as a child with `--json`, returning its JSON result
 on success (200) or `{"error":"..."}` on failure (400/500). Unknown
@@ -687,7 +720,7 @@ descriptors, sockets, threads, and plugin handles on every path.
 
 ## Legal Disclaimer
 
-**ALmap V4.0 is provided "AS IS", without warranty of any kind,
+**ALmap V5.0 is provided "AS IS", without warranty of any kind,
 express or implied, including without limitation the warranties of
 merchantability, fitness for a particular purpose, and
 non-infringement. In no event shall the authors or copyright holders

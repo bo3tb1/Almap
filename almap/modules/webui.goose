@@ -10,9 +10,10 @@ namespace webui;
 //
 // Routes (Goose owns routing; C owns sockets/child processes):
 //   GET  /            -> index HTML page
-//   GET  /api/status  -> {"status":"ok","version":"4.0.0",...}
+//   GET  /api/status  -> {"status":"ok","version":"5.0.0",...}
 //   POST /api/scan    -> JSON {targets,ports,scan_type,fast,os,
-//                        service,evasion,discover,timeout}
+//                        service,evasion,discover,timeout,retries,
+//                        script}
 //                        spawns the ALmap binary (self exe) with
 //                        --json and returns its JSON result.
 //   else              -> 404 JSON
@@ -27,6 +28,8 @@ namespace webui;
 //   "evasion":   bool -f/--fragment (syn/connect only)
 //   "discover":  bool --discover (sets discovery when true)
 //   "timeout":   int ms 1..60000 (default 1000)
+//   "retries":   int 0..10 (default 3; extra --fast timeout retries)
+//   "script":    AlScript .so path (optional)
 //
 // Validation mirrors the CLI in almap.goose: fast requires connect and
 // cannot combine with service/evasion/os; os requires syn; service
@@ -46,10 +49,10 @@ extern fn almap_http_read(client_fd: i32, buf: u8&, cap: i32) -> i32;
 extern fn almap_http_send(client_fd: i32, buf: const u8&, len: i32) -> i32;
 extern fn almap_http_close(fd: i32) -> i32;
 extern fn almap_http_self_exe(buf: u8&, cap: i32) -> i32;
-extern fn almap_http_run_scan(targets: const u8&, ports: const u8&, scan_type: const u8&, fast: i32, os_flag: i32, service_flag: i32, evasion_flag: i32, discover_flag: i32, timeout_ms: i32, script: const u8&, out: u8&, cap: i32, exit_code: i32&) -> i32;
+extern fn almap_http_run_scan(targets: const u8&, ports: const u8&, scan_type: const u8&, fast: i32, os_flag: i32, service_flag: i32, evasion_flag: i32, discover_flag: i32, timeout_ms: i32, retries: i32, script: const u8&, out: u8&, cap: i32, exit_code: i32&) -> i32;
 
 fn version_string() -> const u8[:] {
-    return "4.0.0";
+    return "5.0.0";
 }
 
 fn default_port() -> i64 {
@@ -327,7 +330,8 @@ fn index_html(out: u8[>..]&) {
         <label>Ports<input id="ports" name="ports" value="80,443" placeholder="80,443 or 1-1024" autocomplete="off"></label>
         <label>Scan type<select id="scan_type" name="scan_type"><option value="connect">Connect</option><option value="syn">SYN</option><option value="udp">UDP</option><option value="discovery">Discovery</option></select></label>
         <label>Timeout (ms)<input id="timeout" name="timeout" type="number" value="1000" min="1" max="60000"></label>
-        <label>AlScript (.so)<input id="script" name="script" placeholder="plugins/http_title.so (optional)" autocomplete="off" list="scripts"><datalist id="scripts"><option value="plugins/http_title.so"><option value="plugins/ftp_anon.so"><option value="plugins/ssh_version.so"><option value="plugins/http_methods.so"><option value="plugins/redis_info.so"><option value="plugins/sample_banner.so"></datalist></label>
+        <label>Retries<input id="retries" name="retries" type="number" value="3" min="0" max="10"></label>
+        <label>AlScript (.so)<input id="script" name="script" placeholder="plugins/http_title.so (optional)" autocomplete="off" list="scripts"><datalist id="scripts"><option value="plugins/http_title.so"><option value="plugins/ftp_anon.so"><option value="plugins/ssh_version.so"><option value="plugins/http_methods.so"><option value="plugins/redis_info.so"><option value="plugins/sample_banner.so"><option value="plugins/smb_version.so"><option value="plugins/dns_version.so"><option value="plugins/snmp_sysdescr.so"><option value="plugins/rdp_info.so"><option value="plugins/vnc_auth.so"><option value="plugins/ntp_version.so"><option value="plugins/ldap_rootdse.so"><option value="plugins/sip_options.so"><option value="plugins/ike_version.so"><option value="plugins/http_webdav.so"></datalist></label>
         </div>
         <div class="flags">
         <label><input type="checkbox" id="fast" name="fast"> Fast (async engine)</label>
@@ -348,7 +352,7 @@ fn index_html(out: u8[>..]&) {
         const st=document.getElementById('statusText');
         async function checkStatus(){try{const r=await fetch('/api/status');const j=await r.json();dot.classList.add('on');st.textContent='online - v'+(j.version||'')+' - '+r.status;}catch(e){st.textContent='offline';}}
         checkStatus();
-        document.getElementById('scanForm').addEventListener('submit',async(e)=>{e.preventDefault();btn.disabled=true;out.textContent='Running...';const payload={targets:document.getElementById('targets').value.trim(),ports:document.getElementById('ports').value.trim(),scan_type:document.getElementById('scan_type').value,fast:document.getElementById('fast').checked,os:document.getElementById('os').checked,service:document.getElementById('service').checked,evasion:document.getElementById('evasion').checked,timeout:parseInt(document.getElementById('timeout').value,10)||1000,script:document.getElementById('script').value.trim()};if(payload.scan_type==='discovery'){payload.discover=true;}try{const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const t=await r.text();try{out.textContent=JSON.stringify(JSON.parse(t),null,2);}catch(_){out.textContent=(r.status>399?'Error '+r.status+': ':'')+t;}out.className='terminal '+(r.ok?'':'err');}catch(err){out.textContent='Request failed: '+err.message;out.className='terminal err';}btn.disabled=false;});
+        document.getElementById('scanForm').addEventListener('submit',async(e)=>{e.preventDefault();btn.disabled=true;out.textContent='Running...';const payload={targets:document.getElementById('targets').value.trim(),ports:document.getElementById('ports').value.trim(),scan_type:document.getElementById('scan_type').value,fast:document.getElementById('fast').checked,os:document.getElementById('os').checked,service:document.getElementById('service').checked,evasion:document.getElementById('evasion').checked,timeout:parseInt(document.getElementById('timeout').value,10)||1000,retries:document.getElementById('retries').value===''?3:parseInt(document.getElementById('retries').value,10),script:document.getElementById('script').value.trim()};if(payload.scan_type==='discovery'){payload.discover=true;}try{const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const t=await r.text();try{out.textContent=JSON.stringify(JSON.parse(t),null,2);}catch(_){out.textContent=(r.status>399?'Error '+r.status+': ':'')+t;}out.className='terminal '+(r.ok?'':'err');}catch(err){out.textContent='Request failed: '+err.message;out.className='terminal err';}btn.disabled=false;});
         </script>
         </body>
         </html>
@@ -370,18 +374,21 @@ fn handle_scan(client: i32, body: const u8[:]) {
     let evasion_v, evasion_found = json_bool(body, "evasion");
     let discover_v, discover_found = json_bool(body, "discover");
     let timeout_v, timeout_found = json_int(body, "timeout");
+    let retries_v, retries_found = json_int(body, "retries");
     var is_fast = false;
     var is_os = false;
     var is_service = false;
     var is_evasion = false;
     var discover = false;
     var timeout_ms: i64 = 1000;
+    var retries: i64 = 3;
     if fast_found && fast_v { is_fast = true; }
     if os_found && os_v { is_os = true; }
     if service_found && service_v { is_service = true; }
     if evasion_found && evasion_v { is_evasion = true; }
     if discover_found && discover_v { discover = true; }
     if timeout_found { timeout_ms = timeout_v; }
+    if retries_found { retries = retries_v; }
     if !has_scan || scan_type.len == 0 {
         scan_type.append("connect");
     }
@@ -407,6 +414,12 @@ fn handle_scan(client: i32, body: const u8[:]) {
     if timeout_ms < 1 || timeout_ms > 60000 {
         var err: u8[>..] = [];
         error_json(err, "invalid timeout (expected 1..60000)");
+        send_response(client, 400, "application/json", err);
+        return;
+    }
+    if retries < 0 || retries > 10 {
+        var err: u8[>..] = [];
+        error_json(err, "invalid retries (expected 0..10)");
         send_response(client, 400, "application/json", err);
         return;
     }
@@ -527,7 +540,7 @@ fn handle_scan(client: i32, body: const u8[:]) {
     let service_i: i32 = if is_service { 1 } else { 0 };
     let evasion_i: i32 = if is_evasion { 1 } else { 0 };
     let discover_i: i32 = if discover { 1 } else { 0 };
-    let rc = almap_http_run_scan(targets_c[0], ports_c[0], scan_c[0], fast_i, os_i, service_i, evasion_i, discover_i, timeout_ms as i32, script_c[0], out_buf[0], out_buf.len as i32, exit_buf[0]);
+    let rc = almap_http_run_scan(targets_c[0], ports_c[0], scan_c[0], fast_i, os_i, service_i, evasion_i, discover_i, timeout_ms as i32, retries as i32, script_c[0], out_buf[0], out_buf.len as i32, exit_buf[0]);
     if rc < 0 {
         var err: u8[>..] = [];
         error_json(err, "failed to start scan");

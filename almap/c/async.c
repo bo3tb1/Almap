@@ -232,10 +232,11 @@ static void almap_async_finish(AlmapAsyncEngine *eng, int slot, int state,
 
 int almap_async_connect_scan(const unsigned int *hosts_be, int host_count,
                              const int *ports, int port_count,
-                             int timeout_ms, int max_concurrent,
+                             int timeout_ms, int max_concurrent, int retries,
                              int rate_per_sec, unsigned char *states_out) {
     AlmapAsyncEngine eng;
     AlmapAsyncConn *conns;
+    unsigned char *attempts;
     struct epoll_event *events;
     struct epoll_event ev;
     int64_t total;
@@ -259,7 +260,8 @@ int almap_async_connect_scan(const unsigned int *hosts_be, int host_count,
     if (hosts_be == NULL || ports == NULL || states_out == NULL) {
         return -1;
     }
-    if (timeout_ms <= 0 || max_concurrent <= 0 || rate_per_sec < 0) {
+    if (timeout_ms <= 0 || max_concurrent <= 0 || retries < 0 ||
+        retries > 100 || rate_per_sec < 0) {
         return -1;
     }
 
@@ -277,15 +279,18 @@ int almap_async_connect_scan(const unsigned int *hosts_be, int host_count,
     }
 
     conns = (AlmapAsyncConn *)calloc((size_t)cap, sizeof(*conns));
+    attempts = (unsigned char *)calloc((size_t)total, sizeof(*attempts));
     events = (struct epoll_event *)malloc((size_t)ALMAP_ASYNC_EVENT_BATCH * sizeof(*events));
-    if (conns == NULL || events == NULL) {
+    if (conns == NULL || attempts == NULL || events == NULL) {
         free(conns);
+        free(attempts);
         free(events);
         return -1;
     }
     epfd = epoll_create1(EPOLL_CLOEXEC);
     if (epfd < 0) {
         free(conns);
+        free(attempts);
         free(events);
         return -1;
     }
@@ -315,15 +320,66 @@ int almap_async_connect_scan(const unsigned int *hosts_be, int host_count,
     while (completed < (int)total) {
         now_ns = almap_async_now_ns();
 
-        /* Expire stalled connects from the sorted deadline list. */
+        /* Expire stalled connects from the sorted deadline list. A
+         * timed-out connect is retried (with a fresh deadline) up to
+         * retries times before its final timeout state is recorded. */
         while (eng.timeout_head >= 0 &&
                eng.conns[eng.timeout_head].deadline_ns <= now_ns) {
             int slot = eng.timeout_head;
+            int job;
+            int fd = -1;
+            int state = ALMAP_ASYNC_STATE_TIMEOUT;
+            int launched = 0;
+
             almap_async_deadline_unlink(&eng, slot);
-            almap_async_finish(&eng, slot, ALMAP_ASYNC_STATE_TIMEOUT,
-                               states_out, &completed);
+            job = eng.conns[slot].job;
+            close(eng.conns[slot].fd);
+            eng.conns[slot].fd = -1;
+            eng.conns[slot].active = 0;
             eng.active_count--;
             almap_async_slot_free(&eng, slot);
+
+            attempts[job]++;
+            if (retries > 0 && (int)attempts[job] <= retries) {
+                launched = almap_async_launch_one(hosts_be, port_count, ports,
+                                                  job, &fd, &state);
+                if (launched == 0) {
+                    states_out[job] = (unsigned char)state;
+                    completed++;
+                } else {
+                    int newslot = almap_async_slot_alloc(&eng);
+                    if (newslot < 0) {
+                        close(fd);
+                        states_out[job] = ALMAP_ASYNC_STATE_ERROR;
+                        completed++;
+                    } else {
+                        eng.conns[newslot].fd = fd;
+                        eng.conns[newslot].job = job;
+                        eng.conns[newslot].deadline_ns =
+                            almap_async_now_ns() +
+                            (int64_t)timeout_ms * ALMAP_ASYNC_NS_PER_MS;
+                        eng.conns[newslot].active = 1;
+
+                        memset(&ev, 0, sizeof(ev));
+                        ev.events = EPOLLOUT | EPOLLERR | EPOLLHUP;
+                        ev.data.u32 = (uint32_t)newslot;
+                        if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) != 0) {
+                            close(fd);
+                            eng.conns[newslot].fd = -1;
+                            eng.conns[newslot].active = 0;
+                            states_out[job] = ALMAP_ASYNC_STATE_ERROR;
+                            completed++;
+                            almap_async_slot_free(&eng, newslot);
+                        } else {
+                            almap_async_deadline_append(&eng, newslot);
+                            eng.active_count++;
+                        }
+                    }
+                }
+            } else {
+                states_out[job] = ALMAP_ASYNC_STATE_TIMEOUT;
+                completed++;
+            }
         }
 
         /* Refill the rate bucket and start as much work as allowed. */
@@ -505,6 +561,7 @@ int almap_async_connect_scan(const unsigned int *hosts_be, int host_count,
 
     close(epfd);
     free(conns);
+    free(attempts);
     free(events);
     (void)eng.active_count;
     return rc;

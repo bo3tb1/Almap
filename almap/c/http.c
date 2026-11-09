@@ -266,11 +266,12 @@ int almap_http_self_exe(unsigned char *buf, int cap) {
 int almap_http_run_scan(const char *targets, const char *ports,
                         const char *scan_type, int fast, int os_flag,
                         int service_flag, int evasion_flag,
-                        int discover_flag, int timeout_ms,
+                        int discover_flag, int timeout_ms, int retries,
                         const char *script,
                         unsigned char *out, int cap, int *exit_code) {
     char exe_path[512];
     char timeout_buf[16];
+    char retries_buf[16];
     const char *argv[26];
     int argc = 0;
     int pipefd[2];
@@ -300,6 +301,10 @@ int almap_http_run_scan(const char *targets, const char *ports,
     if (timeout_ms > 0) {
         snprintf(timeout_buf, sizeof(timeout_buf), "%d", timeout_ms);
     }
+    retries_buf[0] = '\0';
+    if (retries >= 0) {
+        snprintf(retries_buf, sizeof(retries_buf), "%d", retries);
+    }
 
     argv[argc++] = exe_path;
     argv[argc++] = "-t";
@@ -318,6 +323,10 @@ int almap_http_run_scan(const char *targets, const char *ports,
         if (timeout_ms > 0) {
             argv[argc++] = "--timeout";
             argv[argc++] = timeout_buf;
+        }
+        if (retries >= 0) {
+            argv[argc++] = "--retries";
+            argv[argc++] = retries_buf;
         }
         if (fast) {
             argv[argc++] = "--fast";

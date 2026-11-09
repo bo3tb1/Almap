@@ -24,6 +24,10 @@ extern "C" {
  * processing is O(1) per expired connection without a per-event timer
  * scan.
  *
+ * retries is the number of additional attempts after a timeout (0
+ * disables retries; the default CLI value is 3). Each retry gets a
+ * fresh timeout_ms deadline before the job is finally marked timeout.
+ *
  * The function is reentrant: all engine state is allocated locally with
  * malloc/calloc and released before returning. It returns 0 when the
  * whole matrix was processed, and -1 for invalid arguments or an
@@ -42,7 +46,7 @@ extern "C" {
 
 int almap_async_connect_scan(const unsigned int *hosts_be, int host_count,
                              const int *ports, int port_count,
-                             int timeout_ms, int max_concurrent,
+                             int timeout_ms, int max_concurrent, int retries,
                              int rate_per_sec, unsigned char *states_out);
 
 /*

@@ -58,6 +58,7 @@ struct Config {
     rate_per_sec: i64,
     timeout_ms: i64,
     workers: i64,
+    retries: i64,
     json: bool,
     table: bool,
     xml: bool,
@@ -71,9 +72,9 @@ struct Config {
 }
 
 fn print_help() {
-    print("ALmap v4.0.0 - modular network scanner");
-    print("Usage: almap -t <targets> -p <ports> [--scan <connect|syn|udp>] [--timeout <ms>] [--workers <n>] [--rate <n>] [--fast] [-f] [--mtu <size>] [-D <ip1,ip2,...>] [--spoof-mac <mac>] [--script <so>] [--sigdb <path>] [--osdb <path>] [--json] [--table] [--xml] [--banners] [--service] [--os] [-sU] [--help]");
-    print("       almap -iL <file> -p <ports> [--scan <connect|syn|udp>] [--timeout <ms>] [--workers <n>] [--rate <n>] [--fast] [-f] [--mtu <size>] [-D <ip1,ip2,...>] [--spoof-mac <mac>] [--script <so>] [--sigdb <path>] [--osdb <path>] [--json] [--table] [--xml] [--banners] [--service] [--os] [-sU] [--help]");
+    print("ALmap v5.0.0 - modular network scanner");
+    print("Usage: almap -t <targets> -p <ports> [--scan <connect|syn|udp>] [--timeout <ms>] [--workers <n>] [--retries <n>] [--rate <n>] [--fast] [-f] [--mtu <size>] [-D <ip1,ip2,...>] [--spoof-mac <mac>] [--script <so>] [--sigdb <path>] [--osdb <path>] [--json] [--table] [--xml] [--banners] [--service] [--os] [-sU] [--help]");
+    print("       almap -iL <file> -p <ports> [--scan <connect|syn|udp>] [--timeout <ms>] [--workers <n>] [--retries <n>] [--rate <n>] [--fast] [-f] [--mtu <size>] [-D <ip1,ip2,...>] [--spoof-mac <mac>] [--script <so>] [--sigdb <path>] [--osdb <path>] [--json] [--table] [--xml] [--banners] [--service] [--os] [-sU] [--help]");
     print("       almap -t <targets> --discover [--timeout <ms>] [--workers <n>] [--json] [--table] [--xml] [--help]");
     print("       almap -iL <file> --discover [--timeout <ms>] [--workers <n>] [--json] [--table] [--xml] [--help]");
     print("       almap --web [--web-port <port>] | almap --ui [--web-port <port>]");
@@ -110,6 +111,7 @@ fn print_help() {
     print("  --rate <n>       Port attempts per second, 0..1000000 (default: 0 = unlimited)");
     print("  --timeout <ms>   Timeout in ms, 1..60000 (default: 1000)");
     print("  --workers <n>    Workers, 1..1000 (default: 10; pool for connect without banners/service, syn, and discover)");
+    print("  --retries <n>    Extra attempts after a timeout in the --fast engine, 0..10 (default: 3)");
     print("  --json           Emit JSON array to stdout (cannot combine with --table or --xml)");
     print("  --table          Emit tab-separated table to stdout (cannot combine with --json or --xml)");
     print("  --xml            Emit XML document to stdout (cannot combine with --json or --table)");
@@ -176,6 +178,13 @@ fn parse_workers(s: const u8[:]) -> i64, bool {
     let v, ok = parse_int(s);
     if !ok { return 0, false; }
     if v < 1 || v > 1000 { return 0, false; }
+    return v, true;
+}
+
+fn parse_retries(s: const u8[:]) -> i64, bool {
+    let v, ok = parse_int(s);
+    if !ok { return 0, false; }
+    if v < 0 || v > 10 { return 0, false; }
     return v, true;
 }
 
@@ -247,6 +256,7 @@ fn main() {
     var table = false;
     var timeout_ms = 1000;
     var workers = 10;
+    var retries = 3;
     var json = false;
     var xml = false;
     var web = false;
@@ -562,6 +572,22 @@ fn main() {
             idx += 2;
             continue;
         }
+        if a == "--retries" {
+            if idx + 1 >= argv.len {
+                print("error: --retries requires a value (n)");
+                print_help();
+                exit(2);
+            }
+            let v, ok = parse_retries(argv[idx + 1]);
+            if !ok {
+                print("error: invalid --retries '", argv[idx + 1], "' (expected 0..10)");
+                print_help();
+                exit(2);
+            }
+            retries = v;
+            idx += 2;
+            continue;
+        }
         if a == "--json" {
             json = true;
             idx += 1;
@@ -749,7 +775,7 @@ fn main() {
         print_help();
         exit(2);
     }
-    let cfg = Config { targets: targets, ports: prs, syn: syn, udp: udp, discover: discover, banners: banners, service: service, os: os, fast: fast, evasion: eva, have_evasion: have_evasion, have_script: have_script, have_sigdb: have_sigdb, have_osdb: have_osdb, rate_per_sec: rate_per_sec, timeout_ms: timeout_ms, workers: workers, json: json, table: table, xml: xml };
+    let cfg = Config { targets: targets, ports: prs, syn: syn, udp: udp, discover: discover, banners: banners, service: service, os: os, fast: fast, evasion: eva, have_evasion: have_evasion, have_script: have_script, have_sigdb: have_sigdb, have_osdb: have_osdb, rate_per_sec: rate_per_sec, timeout_ms: timeout_ms, workers: workers, retries: retries, json: json, table: table, xml: xml };
     // Step 18: target limits are per family (/24../32 IPv4, /112../128
     // IPv6, at most 65536 addresses per target).
     if !target::targets_allowed_mixed(cfg.targets) {
@@ -932,7 +958,7 @@ fn main() {
         }
     } else if cfg.fast {
         let v4_targets = v4_targets_or_exit(cfg.targets);
-        let scanned_fast = connect_scan::scan_connect_fast(v4_targets, cfg.ports, cfg.timeout_ms, cfg.json, cfg.table, cfg.xml, cfg.rate_per_sec);
+        let scanned_fast = connect_scan::scan_connect_fast(v4_targets, cfg.ports, cfg.timeout_ms, cfg.retries, cfg.json, cfg.table, cfg.xml, cfg.rate_per_sec);
         if !scanned_fast {
             exit(1);
         }

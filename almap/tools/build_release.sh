@@ -99,7 +99,7 @@ esac
 VERSION="$(tr -d '[:space:]' < VERSION)"
 [ -n "$VERSION" ] || die "VERSION is empty"
 printf '%s\n' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
-    die "VERSION must look like 4.0.0 (got '$VERSION')"
+    die "VERSION must look like 5.0.0 (got '$VERSION')"
 [ -f almap.goose ] || die "almap.goose not found"
 [ -f signatures.db ] || die "signatures.db not found"
 [ -f plugins/sample_banner.c ] || die "plugins/sample_banner.c not found"
