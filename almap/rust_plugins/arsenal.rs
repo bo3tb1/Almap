@@ -1214,3 +1214,54 @@ pub fn mssql_prelogin(ctx: *mut AlScriptContext) -> Option<(String, String)> {
     }
     Some((version, instance))
 }
+
+/* ---------------------------------------------------------------- */
+/* HTTP Basic auth + brute wordlist (arsenal_util.h)                */
+/* ---------------------------------------------------------------- */
+
+pub const BRUTE_WORDS: [&str; 10] = [
+    "admin", "root", "password", "123456", "admin123",
+    "root123", "toor", "letmein", "qwerty", "test",
+];
+
+/* Standard base64 (matches ar_b64 in arsenal_util.h). */
+pub fn b64(input: &[u8]) -> String {
+    const TAB: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i + 3 <= input.len() {
+        let v = ((input[i] as u32) << 16)
+            | ((input[i + 1] as u32) << 8)
+            | (input[i + 2] as u32);
+        out.push(TAB[((v >> 18) & 63) as usize] as char);
+        out.push(TAB[((v >> 12) & 63) as usize] as char);
+        out.push(TAB[((v >> 6) & 63) as usize] as char);
+        out.push(TAB[(v & 63) as usize] as char);
+        i += 3;
+    }
+    match input.len() - i {
+        1 => {
+            let v = (input[i] as u32) << 16;
+            out.push(TAB[((v >> 18) & 63) as usize] as char);
+            out.push(TAB[((v >> 12) & 63) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let v = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
+            out.push(TAB[((v >> 18) & 63) as usize] as char);
+            out.push(TAB[((v >> 12) & 63) as usize] as char);
+            out.push(TAB[((v >> 6) & 63) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+/* Build an HTTP Basic "Authorization:" header line (with trailing CRLF). */
+pub fn basic_auth(user: &str, pass: &str) -> String {
+    let raw = format!("{}:{}", user, pass);
+    format!("Authorization: Basic {}\r\n", b64(raw.as_bytes()))
+}
