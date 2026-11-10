@@ -73,6 +73,33 @@ pub fn set_out(ctx: *mut AlScriptContext, s: &str) {
     }
 }
 
+/* Append to the current plugin output buffer (mirrors ar_append). */
+pub fn append_out(ctx: *mut AlScriptContext, s: &str) {
+    if ctx.is_null() {
+        return;
+    }
+    unsafe {
+        let c = &*ctx;
+        if c.output_buf.is_null() || c.output_max < 2 {
+            return;
+        }
+        let cap = c.output_max as usize;
+        let mut used = 0usize;
+        while used < cap && *c.output_buf.add(used) != 0 {
+            used += 1;
+        }
+        if used + 1 >= cap {
+            return;
+        }
+        let room = cap - used - 1;
+        let bytes = s.as_bytes();
+        let n = if bytes.len() < room { bytes.len() } else { room };
+        let dst = std::slice::from_raw_parts_mut(c.output_buf as *mut u8, used + n + 1);
+        dst[used..used + n].copy_from_slice(&bytes[..n]);
+        dst[used + n] = 0;
+    }
+}
+
 pub fn trim(s: &str) -> String {
     s.trim_matches(|c| c == ' ' || c == '\t' || c == '\r' || c == '\n')
         .to_string()
@@ -325,6 +352,38 @@ pub fn http_request(
     Some(String::from_utf8_lossy(&b).into_owned())
 }
 
+/* Build an HTTP Basic Authorization header value. */
+pub fn basic_auth(user: &str, pass: &str) -> String {
+    const TAB: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let raw = format!("{}:{}", user, pass);
+    let bytes = raw.as_bytes();
+    let mut out = String::from("Authorization: Basic ");
+    let mut i = 0usize;
+    while i + 2 < bytes.len() {
+        let v = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | bytes[i + 2] as u32;
+        out.push(TAB[((v >> 18) & 63) as usize] as char);
+        out.push(TAB[((v >> 12) & 63) as usize] as char);
+        out.push(TAB[((v >> 6) & 63) as usize] as char);
+        out.push(TAB[(v & 63) as usize] as char);
+        i += 3;
+    }
+    if bytes.len() > i {
+        let a = bytes[i] as u32;
+        let b = if i + 1 < bytes.len() { bytes[i + 1] as u32 } else { 0 };
+        let v = (a << 16) | (b << 8);
+        out.push(TAB[((v >> 18) & 63) as usize] as char);
+        out.push(TAB[((v >> 12) & 63) as usize] as char);
+        out.push(if i + 1 < bytes.len() {
+            TAB[((v >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push('=');
+    }
+    out.push_str("\r\n");
+    out
+}
+
 /* ---------------------------------------------------------------- */
 /* FTP (arsenal_util.h)                                             */
 /* ---------------------------------------------------------------- */
@@ -403,7 +462,7 @@ fn be32(b: &[u8]) -> u32 {
     ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | b[3] as u32
 }
 
-fn smb_recv_nb(stream: &mut TcpStream, cap: usize) -> Option<Vec<u8>> {
+pub fn smb_recv_nb(stream: &mut TcpStream, cap: usize) -> Option<Vec<u8>> {
     if cap < 5 {
         return None;
     }
@@ -821,6 +880,56 @@ pub fn ssh_auth_none(stream: &mut TcpStream, user: &str, cap: usize) -> (i32, St
     (-1, String::new())
 }
 
+/* Attempt SSH password authentication. Returns (rc, methods):
+ * 1 = accepted, 0 = rejected (methods lists the remaining auth
+ * methods), -1 = protocol/transport error. */
+pub fn ssh_auth_password(
+    stream: &mut TcpStream,
+    user: &str,
+    pass: &str,
+    cap: usize,
+) -> (i32, String) {
+    let ulen = user.len();
+    let plen = pass.len();
+    if ulen > 200 || plen > 400 || cap < 2 {
+        return (-1, String::new());
+    }
+    let mut pkt = Vec::new();
+    pkt.push(SSH_MSG_USERAUTH_REQUEST);
+    ssh_put_u32(&mut pkt, ulen as u32);
+    pkt.extend_from_slice(user.as_bytes());
+    ssh_put_u32(&mut pkt, 14);
+    pkt.extend_from_slice(b"ssh-connection");
+    ssh_put_u32(&mut pkt, 8);
+    pkt.extend_from_slice(b"password");
+    pkt.push(0);
+    ssh_put_u32(&mut pkt, plen as u32);
+    pkt.extend_from_slice(pass.as_bytes());
+    if ssh_send_packet(stream, &pkt).is_err() {
+        return (-1, String::new());
+    }
+    let resp = match ssh_recv_packet(stream, 1024) {
+        Some(r) => r,
+        None => return (-1, String::new()),
+    };
+    if resp.is_empty() {
+        return (-1, String::new());
+    }
+    if resp[0] == SSH_MSG_USERAUTH_SUCCESS {
+        return (1, "password".to_string());
+    }
+    if resp[0] == SSH_MSG_USERAUTH_FAILURE && resp.len() >= 5 {
+        let mlen = ssh_get_u32(&resp[1..5]) as usize;
+        if mlen < cap && 5 + mlen <= resp.len() {
+            return (
+                0,
+                String::from_utf8_lossy(&resp[5..5 + mlen]).into_owned(),
+            );
+        }
+    }
+    (-1, String::new())
+}
+
 /* ---------------------------------------------------------------- */
 /* DNS (arsenal_dns.h)                                              */
 /* ---------------------------------------------------------------- */
@@ -1186,6 +1295,70 @@ pub fn smb1_tree_connect(
     (status, tid)
 }
 
+/* PeekNamedPipe probe used by the full MS17-010 check. Returns the raw
+ * SMB1 status, or 0xFFFFFFFF on I/O failure (mirrors ms17_peek in C). */
+pub fn smb1_ms17_peek(stream: &mut TcpStream, tid: u32, uid: u32) -> u32 {
+    let msglen: usize = 74;
+    let mut req = [0u8; 96];
+    req[0] = 0x00;
+    req[1] = ((msglen >> 16) & 0xFF) as u8;
+    req[2] = ((msglen >> 8) & 0xFF) as u8;
+    req[3] = (msglen & 0xFF) as u8;
+    let smb = &mut req[4..];
+    smb[0] = 0xFF;
+    smb[1] = b'S';
+    smb[2] = b'M';
+    smb[3] = b'B';
+    smb[4] = 0x25;
+    smb[9] = 0x18;
+    smb[10] = 0x53;
+    smb[11] = 0xC8;
+    smb[24] = (tid >> 8) as u8;
+    smb[25] = (tid & 0xFF) as u8;
+    smb[26] = 0xFE;
+    smb[27] = 0xFF;
+    smb[28] = (uid >> 8) as u8;
+    smb[29] = (uid & 0xFF) as u8;
+    smb[32] = 16;
+    let w = &mut smb[33..];
+    w[4] = 0xFF;
+    w[5] = 0xFF;
+    w[6] = 0xFF;
+    w[7] = 0xFF;
+    w[20] = 0x4A;
+    w[21] = 0x00;
+    w[24] = 0x4A;
+    w[25] = 0x00;
+    w[26] = 0x02;
+    w[28] = 0x23;
+    w[29] = 0x00;
+    w[30] = 0x00;
+    w[31] = 0x00;
+    smb[65] = 0x07;
+    smb[66] = 0x00;
+    smb[67] = b'\\';
+    smb[68] = b'P';
+    smb[69] = b'I';
+    smb[70] = b'P';
+    smb[71] = b'E';
+    smb[72] = b'\\';
+    smb[73] = 0x00;
+    if send_all(stream, &req[..msglen + 4]).is_err() {
+        return 0xFFFFFFFF;
+    }
+    let resp = match smb_recv_nb(stream, 1024) {
+        Some(r) => r,
+        None => return 0xFFFFFFFF,
+    };
+    if resp.len() < 9 {
+        return 0xFFFFFFFF;
+    }
+    (resp[5] as u32)
+        | ((resp[6] as u32) << 8)
+        | ((resp[7] as u32) << 16)
+        | ((resp[8] as u32) << 24)
+}
+
 /* ---------------------------------------------------------------- */
 /* MSSQL / TDS 7.x (arsenal_mssql.h)                                */
 /* ---------------------------------------------------------------- */
@@ -1255,4 +1428,1215 @@ pub fn mssql_prelogin(ctx: *mut AlScriptContext) -> Option<(String, String)> {
         }
     }
     Some((version, instance))
+}
+
+/* ---------------------------------------------------------------- */
+/* TLS / Heartbleed / CCS / DH (arsenal_tls.h)                      */
+/* ---------------------------------------------------------------- */
+
+pub const TLS_CCS: u8 = 20;
+pub const TLS_ALERT: u8 = 21;
+pub const TLS_HANDSHAKE: u8 = 22;
+pub const TLS_HEARTBEAT: u8 = 24;
+
+pub const TLS_CIPHERS: [u16; 24] = [
+    0xC02F, 0xC030, 0xC02B, 0xC02C, 0xCCA8, 0xCCA9, 0x009E, 0x009F, 0x002F, 0x0035,
+    0x003C, 0x003D, 0x000A, 0x0005, 0x0004, 0x0067, 0x006B, 0x0033, 0x0039, 0x0016,
+    0x0023, 0x0009, 0x0006, 0x0003,
+];
+
+pub const TLS_CBC_CIPHERS: [u16; 16] = [
+    0x002F, 0x0035, 0x003C, 0x003D, 0x000A, 0x0005, 0x0004, 0x0067, 0x006B, 0x0033,
+    0x0039, 0x0016, 0x0023, 0x0009, 0x0006, 0x0003,
+];
+
+pub fn tls_is_cbc(cipher: u32) -> bool {
+    TLS_CBC_CIPHERS.iter().any(|c| *c as u32 == cipher)
+}
+
+pub fn tls_cipher_name(c: u32) -> &'static str {
+    match c {
+        0xC02F => "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        0xC030 => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        0xC02B => "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        0xC02C => "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        0xCCA8 => "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305",
+        0xCCA9 => "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305",
+        0x009E => "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
+        0x009F => "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+        0x002F => "TLS_RSA_WITH_AES_128_CBC_SHA",
+        0x0035 => "TLS_RSA_WITH_AES_256_CBC_SHA",
+        0x003C => "TLS_RSA_WITH_AES_128_CBC_SHA256",
+        0x003D => "TLS_RSA_WITH_AES_256_CBC_SHA256",
+        0x000A => "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+        0x0005 => "TLS_RSA_WITH_RC4_128_SHA",
+        0x0004 => "TLS_RSA_WITH_RC4_128_MD5",
+        0x0067 => "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256",
+        0x006B => "TLS_DHE_RSA_WITH_AES_256_CBC_SHA256",
+        0x0033 => "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
+        0x0039 => "TLS_DHE_RSA_WITH_AES_256_CBC_SHA",
+        0x0016 => "TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA",
+        0x0023 => "TLS_DHE_DSS_WITH_AES_128_CBC_SHA",
+        0x0009 => "TLS_RSA_WITH_DES_CBC_SHA",
+        0x0006 | 0x0003 => "TLS_RSA_EXPORT_WITH_RC4_40_MD5",
+        _ => "unknown",
+    }
+}
+
+pub fn tls_version_name(v: u32) -> &'static str {
+    match v {
+        0x0300 => "SSLv3",
+        0x0301 => "TLSv1.0",
+        0x0302 => "TLSv1.1",
+        0x0303 => "TLSv1.2",
+        0x0304 => "TLSv1.3",
+        _ => "unknown",
+    }
+}
+
+pub fn tls_client_hello(version: u32, ciphers: &[u16], heartbeat: bool) -> Vec<u8> {
+    let mut body: Vec<u8> = Vec::with_capacity(512);
+    body.push((version >> 8) as u8);
+    body.push((version & 255) as u8);
+    for i in 0..32u8 {
+        body.push(0x30 + i);
+    }
+    body.push(0); /* session id length */
+    let clen = ciphers.len() * 2;
+    body.push((clen >> 8) as u8);
+    body.push((clen & 255) as u8);
+    for c in ciphers {
+        body.push((*c >> 8) as u8);
+        body.push((*c & 255) as u8);
+    }
+    body.push(1);
+    body.push(0);
+    let ext_len_pos = body.len();
+    body.push(0);
+    body.push(0);
+    let ext_start = body.len();
+    if version >= 0x0301 {
+        body.extend_from_slice(&[0x00, 0x0A, 0x00, 0x08, 0x00, 0x06, 0x00, 0x1D, 0x00, 0x17, 0x00, 0x18]);
+        body.extend_from_slice(&[0x00, 0x0B, 0x00, 0x02, 0x01, 0x00]);
+        body.extend_from_slice(&[0x00, 0x0D, 0x00, 0x0A, 0x00, 0x08, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01, 0x05, 0x01]);
+        body.extend_from_slice(&[0xFF, 0x01, 0x00, 0x01, 0x00]);
+        if heartbeat {
+            body.extend_from_slice(&[0x00, 0x0F, 0x00, 0x01, 0x01]);
+        }
+    }
+    let elen = body.len() - ext_start;
+    body[ext_len_pos] = (elen >> 8) as u8;
+    body[ext_len_pos + 1] = (elen & 255) as u8;
+
+    let mut out = Vec::with_capacity(9 + body.len());
+    out.push(TLS_HANDSHAKE);
+    out.push((version >> 8) as u8);
+    out.push((version & 255) as u8);
+    let rlen = body.len() + 4;
+    out.push((rlen >> 8) as u8);
+    out.push((rlen & 255) as u8);
+    out.push(1);
+    out.push((body.len() >> 16) as u8);
+    out.push((body.len() >> 8) as u8);
+    out.push((body.len() & 255) as u8);
+    out.extend_from_slice(&body);
+    out
+}
+
+pub fn tls_read_record(stream: &mut TcpStream, cap: usize) -> Option<Vec<u8>> {
+    let hdr = recv_exact(stream, 5)?;
+    let len = ((hdr[3] as usize) << 8) | hdr[4] as usize;
+    if len + 1 > cap {
+        return None;
+    }
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    recv_exact(stream, len)
+}
+
+pub fn tls_parse_server_hello(p: &[u8]) -> Option<(u32, u32)> {
+    if p.len() < 40 || p[0] != 2 {
+        return None;
+    }
+    let version = ((p[4] as u32) << 8) | p[5] as u32;
+    let mut off = 6 + 32;
+    if off >= p.len() {
+        return None;
+    }
+    let sid_len = p[off] as usize;
+    off += 1 + sid_len;
+    if off + 2 > p.len() {
+        return None;
+    }
+    let cipher = ((p[off] as u32) << 8) | p[off + 1] as u32;
+    Some((version, cipher))
+}
+
+fn tls_exchange(ctx: *mut AlScriptContext, hello: &[u8], cap: usize) -> Option<Vec<u8>> {
+    let mut s = connect_ctx(ctx)?;
+    send_all(&mut s, hello).ok()?;
+    tls_read_record(&mut s, cap)
+}
+
+/* Returns (rc, selected version, selected cipher): rc 1 ok, 0 not
+ * negotiated/alert, -1 handshake failure. */
+pub fn tls_probe(
+    ctx: *mut AlScriptContext,
+    version: u32,
+    ciphers: &[u16],
+    heartbeat: bool,
+) -> (i32, u32, u32) {
+    let hello = tls_client_hello(version, ciphers, heartbeat);
+    let resp = match tls_exchange(ctx, &hello, 4096) {
+        Some(r) => r,
+        None => return (-1, 0, 0),
+    };
+    if resp.first() == Some(&TLS_ALERT) {
+        return (0, 0, 0);
+    }
+    match tls_parse_server_hello(&resp) {
+        Some((v, c)) => (1, v, c),
+        None => (-1, 0, 0),
+    }
+}
+
+pub fn tls_heartbleed(ctx: *mut AlScriptContext) -> (i32, Vec<u8>) {
+    let hello = tls_client_hello(0x0301, &TLS_CIPHERS, true);
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, Vec::new()),
+    };
+    if send_all(&mut s, &hello).is_err() {
+        return (-1, Vec::new());
+    }
+    let resp = match tls_read_record(&mut s, 4096) {
+        Some(r) => r,
+        None => return (0, Vec::new()),
+    };
+    if resp.first() == Some(&TLS_ALERT) {
+        return (0, resp);
+    }
+    let (ver, _cipher) = match tls_parse_server_hello(&resp) {
+        Some(v) => v,
+        None => return (0, resp),
+    };
+    let hb = [
+        TLS_HEARTBEAT,
+        (ver >> 8) as u8,
+        (ver & 255) as u8,
+        0,
+        3,
+        1,
+        0x40,
+        0x00,
+    ];
+    if send_all(&mut s, &hb).is_err() {
+        return (0, resp);
+    }
+    let mut s2 = s;
+    s2.set_read_timeout(Some(Duration::from_millis(500))).ok();
+    match tls_read_record(&mut s2, 4096) {
+        Some(r) if r.len() > 3 && r.first() == Some(&TLS_HEARTBEAT) => (1, r),
+        _ => (0, resp),
+    }
+}
+
+pub fn tls_ccs_test(ctx: *mut AlScriptContext) -> (i32, u32, u32, Vec<u8>) {
+    let hello = tls_client_hello(0x0303, &TLS_CIPHERS, false);
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, 0, 0, Vec::new()),
+    };
+    if send_all(&mut s, &hello).is_err() {
+        return (-1, 0, 0, Vec::new());
+    }
+    let mut resp = match tls_read_record(&mut s, 4096) {
+        Some(r) => r,
+        None => return (-1, 0, 0, Vec::new()),
+    };
+    let (ver, cipher) = match tls_parse_server_hello(&resp) {
+        Some(v) => v,
+        None => return (-1, 0, 0, resp),
+    };
+    for _ in 0..6 {
+        if resp.first() == Some(&TLS_ALERT) {
+            return (0, ver, cipher, resp);
+        }
+        if resp.len() >= 6 && resp[0] == 14 {
+            break;
+        }
+        match tls_read_record(&mut s, 4096) {
+            Some(r) if !r.is_empty() => resp = r,
+            _ => break,
+        }
+    }
+    let ccs = [TLS_CCS, 0x03, 0x01, 0x00, 0x01, 0x01];
+    if send_all(&mut s, &ccs).is_err() {
+        return (-1, ver, cipher, resp);
+    }
+    s.set_read_timeout(Some(Duration::from_millis(500))).ok();
+    match tls_read_record(&mut s, 4096) {
+        Some(r) if !r.is_empty() && r.first() != Some(&TLS_ALERT) => (1, ver, cipher, r),
+        _ => (0, ver, cipher, resp),
+    }
+}
+
+/* Returns (rc, bits, group_len). rc 0 on a completed probe, -1 on handshake
+ * failure. */
+pub fn tls_dh_bits(ctx: *mut AlScriptContext) -> (i32, i32, u32) {
+    const DHE: [u16; 7] = [0x009E, 0x009F, 0x0067, 0x006B, 0x0033, 0x0039, 0x0016];
+    let hello = tls_client_hello(0x0303, &DHE, false);
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, 0, 0),
+    };
+    if send_all(&mut s, &hello).is_err() {
+        return (-1, 0, 0);
+    }
+    let rec = match tls_read_record(&mut s, 4096) {
+        Some(r) => r,
+        None => return (-1, 0, 0),
+    };
+    if tls_parse_server_hello(&rec).is_none() {
+        return (-1, 0, 0);
+    }
+    let mut bits = 0i32;
+    let mut group_len = 0u32;
+    for _ in 0..4 {
+        let rec = match tls_read_record(&mut s, 4096) {
+            Some(r) => r,
+            None => break,
+        };
+        if rec.is_empty() || rec[0] != 12 {
+            continue;
+        }
+        let mut off = 4usize;
+        if off + 2 > rec.len() {
+            break;
+        }
+        if rec[off] == 3 {
+            bits = 0;
+            group_len = 0;
+            break;
+        }
+        let plen = ((rec[off] as usize) << 8) | rec[off + 1] as usize;
+        off += 2;
+        if plen > 1024 || plen > rec.len().saturating_sub(off) || plen < 64 {
+            bits = 0;
+            group_len = 0;
+            break;
+        }
+        if plen >= 2 {
+            let pbits = ((rec[off] as u32) << 8) | rec[off + 1] as u32;
+            if (512..=8192).contains(&pbits) {
+                bits = pbits as i32;
+                group_len = pbits / 8;
+            }
+        }
+        break;
+    }
+    (0, bits, group_len)
+}
+
+/* Raw Heartbleed probe for the "full" plugin: returns (rc, leaked_bytes). */
+pub fn tls_heartbleed_raw(ctx: *mut AlScriptContext, version: u32) -> (i32, usize) {
+    let hello = tls_client_hello(version, &TLS_CIPHERS, true);
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, 0),
+    };
+    if send_all(&mut s, &hello).is_err() {
+        return (-1, 0);
+    }
+    let mut resp = match tls_read_record(&mut s, 4096) {
+        Some(r) => r,
+        None => return (-1, 0),
+    };
+    if resp.first() == Some(&TLS_ALERT) || tls_parse_server_hello(&resp).is_none() {
+        return (-1, 0);
+    }
+    for _ in 0..8 {
+        if resp.len() >= 6 && resp[0] == TLS_HANDSHAKE && resp[5] == 14 {
+            break;
+        }
+        if resp.first() == Some(&TLS_ALERT) {
+            break;
+        }
+        s.set_read_timeout(Some(Duration::from_millis(300))).ok();
+        match tls_read_record(&mut s, 4096) {
+            Some(r) if !r.is_empty() => resp = r,
+            _ => break,
+        }
+    }
+    let hb = [
+        TLS_HEARTBEAT,
+        (version >> 8) as u8,
+        (version & 255) as u8,
+        0x00,
+        0x03,
+        0x01,
+        0x40,
+        0x00,
+    ];
+    if send_all(&mut s, &hb).is_err() {
+        return (-1, 0);
+    }
+    s.set_read_timeout(Some(Duration::from_millis(800))).ok();
+    match tls_read_record(&mut s, 4096) {
+        Some(r) if r.len() > 3 && r.first() == Some(&TLS_HEARTBEAT) => (1, r.len()),
+        _ => (0, 0),
+    }
+}
+/* ---------------------------------------------------------------- */
+/* DES (arsenal_des.h) - VNC authentication                        */
+/* ---------------------------------------------------------------- */
+const DES_IP: [u8; 64] = [
+    58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4,
+    62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8,
+    57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3,
+    61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
+];
+const DES_FP: [u8; 64] = [
+    40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31,
+    38, 6, 46, 14, 54, 22, 62, 30, 37, 5, 45, 13, 53, 21, 61, 29,
+    36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27,
+    34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25,
+];
+const DES_E: [u8; 48] = [
+    32, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 9, 8, 9, 10, 11,
+    12, 13, 12, 13, 14, 15, 16, 17, 16, 17, 18, 19, 20, 21, 20, 21,
+    22, 23, 24, 25, 24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1,
+];
+const DES_P: [u8; 32] = [
+    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10,
+    2, 8, 24, 14, 32, 27, 3, 9, 19, 13, 30, 6, 22, 11, 4, 25,
+];
+const DES_PC1: [u8; 56] = [
+    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18, 10, 2,
+    59, 51, 43, 35, 27, 19, 11, 3, 60, 52, 44, 36, 63, 55, 47, 39,
+    31, 23, 15, 7, 62, 54, 46, 38, 30, 22, 14, 6, 61, 53, 45, 37,
+    29, 21, 13, 5, 28, 20, 12, 4,
+];
+const DES_PC2: [u8; 48] = [
+    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10, 23, 19, 12, 4,
+    26, 8, 16, 7, 27, 20, 13, 2, 41, 52, 31, 37, 47, 55, 30, 40,
+    51, 45, 33, 48, 44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32,
+];
+const DES_SHIFTS: [u8; 16] = [
+    1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1,
+];
+const DES_S: [[[u8; 16]; 4]; 8] = [
+    [
+        [14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7],
+        [0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12, 11, 9, 5, 3, 8],
+        [4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0],
+        [15, 12, 8, 2, 4, 9, 1, 7, 5, 11, 3, 14, 10, 0, 6, 13],
+    ],
+    [
+        [15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10],
+        [3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1, 10, 6, 9, 11, 5],
+        [0, 14, 7, 11, 10, 4, 13, 1, 5, 8, 12, 6, 9, 3, 2, 15],
+        [13, 8, 10, 1, 3, 15, 4, 2, 11, 6, 7, 12, 0, 5, 14, 9],
+    ],
+    [
+        [10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8],
+        [13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5, 14, 12, 11, 15, 1],
+        [13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7],
+        [1, 10, 13, 0, 6, 9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12],
+    ],
+    [
+        [7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15],
+        [13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2, 12, 1, 10, 14, 9],
+        [10, 6, 9, 0, 12, 11, 7, 13, 15, 1, 3, 14, 5, 2, 8, 4],
+        [3, 15, 0, 6, 10, 1, 13, 8, 9, 4, 5, 11, 12, 7, 2, 14],
+    ],
+    [
+        [2, 12, 4, 1, 7, 10, 11, 6, 8, 5, 3, 15, 13, 0, 14, 9],
+        [14, 11, 2, 12, 4, 7, 13, 1, 5, 0, 15, 10, 3, 9, 8, 6],
+        [4, 2, 1, 11, 10, 13, 7, 8, 15, 9, 12, 5, 6, 3, 0, 14],
+        [11, 8, 12, 7, 1, 14, 2, 13, 6, 15, 0, 9, 10, 4, 5, 3],
+    ],
+    [
+        [12, 1, 10, 15, 9, 2, 6, 8, 0, 13, 3, 4, 14, 7, 5, 11],
+        [10, 15, 4, 2, 7, 12, 9, 5, 6, 1, 13, 14, 0, 11, 3, 8],
+        [9, 14, 15, 5, 2, 8, 12, 3, 7, 0, 4, 10, 1, 13, 11, 6],
+        [4, 3, 2, 12, 9, 5, 15, 10, 11, 14, 1, 7, 6, 0, 8, 13],
+    ],
+    [
+        [4, 11, 2, 14, 15, 0, 8, 13, 3, 12, 9, 7, 5, 10, 6, 1],
+        [13, 0, 11, 7, 4, 9, 1, 10, 14, 3, 5, 12, 2, 15, 8, 6],
+        [1, 4, 11, 13, 12, 3, 7, 14, 10, 15, 6, 8, 0, 5, 9, 2],
+        [6, 11, 13, 8, 1, 4, 10, 7, 9, 5, 0, 15, 14, 2, 3, 12],
+    ],
+    [
+        [13, 2, 8, 4, 6, 15, 11, 1, 10, 9, 3, 14, 5, 0, 12, 7],
+        [1, 15, 13, 8, 10, 3, 7, 4, 12, 5, 6, 11, 0, 14, 9, 2],
+        [7, 11, 4, 1, 9, 12, 14, 2, 0, 6, 10, 13, 15, 3, 5, 8],
+        [2, 1, 14, 7, 4, 10, 8, 13, 15, 12, 9, 0, 3, 5, 6, 11],
+    ],
+];
+
+fn des_perm(inp: u64, tab: &[u8], n: usize, inbits: u32) -> u64 {
+    let mut out = 0u64;
+    for i in 0..n {
+        out <<= 1;
+        out |= (inp >> (inbits - tab[i] as u32)) & 1;
+    }
+    out
+}
+
+fn des_rotl28(v: u32, n: u32) -> u32 {
+    ((v << n) | (v >> (28 - n))) & 0x0FFF_FFFF
+}
+
+fn des_key_schedule(key: &[u8; 8]) -> [u64; 16] {
+    let mut k = 0u64;
+    for b in key.iter() {
+        k = (k << 8) | *b as u64;
+    }
+    let pc1 = des_perm(k, &DES_PC1, 56, 64);
+    let mut c = ((pc1 >> 28) & 0x0FFF_FFFF) as u32;
+    let mut d = (pc1 & 0x0FFF_FFFF) as u32;
+    let mut sub = [0u64; 16];
+    for i in 0..16 {
+        c = des_rotl28(c, DES_SHIFTS[i] as u32);
+        d = des_rotl28(d, DES_SHIFTS[i] as u32);
+        sub[i] = des_perm(((c as u64) << 28) | d as u64, &DES_PC2, 48, 56);
+    }
+    sub
+}
+
+pub fn des_encrypt_block(key: &[u8; 8], inp: &[u8], out: &mut [u8]) {
+    let mut block = 0u64;
+    for i in 0..8 {
+        block = (block << 8) | inp[i] as u64;
+    }
+    let sub = des_key_schedule(key);
+    let ip = des_perm(block, &DES_IP, 64, 64);
+    let mut l = (ip >> 32) as u32;
+    let mut r = (ip & 0xFFFF_FFFF) as u32;
+    for i in 0..16 {
+        let er = des_perm(r as u64, &DES_E, 48, 32) ^ sub[i];
+        let mut sv = 0u32;
+        for j in 0..8 {
+            let six = ((er >> (42 - j * 6)) & 0x3F) as usize;
+            let row = ((six & 0x20) >> 4) | (six & 1);
+            let col = (six >> 1) & 0x0F;
+            sv = (sv << 4) | DES_S[j][row][col] as u32;
+        }
+        let f = des_perm(sv as u64, &DES_P, 32, 32) as u32;
+        let nr = l ^ f;
+        l = r;
+        r = nr;
+    }
+    let mut b = ((r as u64) << 32) | l as u64;
+    b = des_perm(b, &DES_FP, 64, 64);
+    for i in (0..8).rev() {
+        out[i] = (b & 255) as u8;
+        b >>= 8;
+    }
+}
+
+pub fn des_reverse8(mut b: u8) -> u8 {
+    let mut r = 0u8;
+    for _ in 0..8 {
+        r = (r << 1) | (b & 1);
+        b >>= 1;
+    }
+    r
+}
+
+
+/* ---------------------------------------------------------------- */
+/* PostgreSQL v3 (arsenal_pgsql.h)                                  */
+/* ---------------------------------------------------------------- */
+
+fn pg_put32(p: &mut [u8], v: u32) {
+    p[0] = (v >> 24) as u8;
+    p[1] = (v >> 16) as u8;
+    p[2] = (v >> 8) as u8;
+    p[3] = v as u8;
+}
+
+/* Returns (rc, stream): rc 0 = startup sent, -1 = failure, -2 = SSL
+ * offered by the server (connection closed). */
+pub fn pg_start(
+    ctx: *mut AlScriptContext,
+    user: &str,
+    db: &str,
+) -> (i32, Option<TcpStream>) {
+    const SSLREQ: [u8; 8] = [0, 0, 0, 8, 0x04, 0xD2, 0x16, 0x2F];
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, None),
+    };
+    if send_all(&mut s, &SSLREQ).is_err() {
+        return (-1, None);
+    }
+    let b = match recv_exact(&mut s, 1) {
+        Some(v) => v[0],
+        None => return (-1, None),
+    };
+    if b == b'S' {
+        return (-2, None);
+    }
+    if b != b'N' {
+        return (-1, None);
+    }
+    let mut pkt = vec![0u8; 512];
+    let mut o = 8usize;
+    pkt[o..o + 5].copy_from_slice(b"user\0");
+    o += 5;
+    let ub = user.as_bytes();
+    pkt[o..o + ub.len() + 1].copy_from_slice(ub);
+    o += ub.len() + 1;
+    pkt[o - 1] = 0;
+    pkt[o..o + 9].copy_from_slice(b"database\0");
+    o += 9;
+    let db_b = db.as_bytes();
+    pkt[o..o + db_b.len() + 1].copy_from_slice(db_b);
+    o += db_b.len() + 1;
+    pkt[o - 1] = 0;
+    pkt[o] = 0;
+    o += 1;
+    pg_put32(&mut pkt[0..4], o as u32);
+    pg_put32(&mut pkt[4..8], 196608);
+    if send_all(&mut s, &pkt[..o]).is_err() {
+        return (-1, None);
+    }
+    (0, Some(s))
+}
+
+/* Returns (rc, message): 1 = accepted, 0 = rejected/SSL required,
+ * -1 = protocol error. */
+pub fn pg_login(ctx: *mut AlScriptContext, user: &str, pass: &str) -> (i32, String) {
+    let (rc, s) = pg_start(ctx, user, "postgres");
+    if rc == -2 {
+        return (0, "SSL required".to_string());
+    }
+    let mut s = match s {
+        Some(s) => s,
+        None => return (-1, String::new()),
+    };
+    let hdr = match recv_exact(&mut s, 5) {
+        Some(h) => h,
+        None => return (-1, String::new()),
+    };
+    let len = ((hdr[1] as usize) << 24)
+        | ((hdr[2] as usize) << 16)
+        | ((hdr[3] as usize) << 8)
+        | hdr[4] as usize;
+    if len < 4 || len - 4 > 512 {
+        return (-1, String::new());
+    }
+    let body = match recv_exact(&mut s, len - 4) {
+        Some(b) => b,
+        None => return (-1, String::new()),
+    };
+    if hdr[0] != b'R' {
+        return (0, format!("auth type {}", hdr[0] as char));
+    }
+    let code = ((body[0] as u32) << 24)
+        | ((body[1] as u32) << 16)
+        | ((body[2] as u32) << 8)
+        | body[3] as u32;
+    if code == 0 {
+        return (1, "OK".to_string());
+    }
+    if code != 3 {
+        return (0, format!("auth code {}", code));
+    }
+    let mut pkt = vec![0u8; 512];
+    pkt[0] = b'p';
+    let pb = pass.as_bytes();
+    pkt[5..5 + pb.len()].copy_from_slice(pb);
+    let mut o = 5 + pb.len();
+    pkt[o] = 0;
+    o += 1;
+    pg_put32(&mut pkt[1..5], o as u32);
+    if send_all(&mut s, &pkt[..o]).is_err() {
+        return (-1, String::new());
+    }
+    let hdr = match recv_exact(&mut s, 5) {
+        Some(h) => h,
+        None => return (-1, String::new()),
+    };
+    let len = ((hdr[1] as usize) << 24)
+        | ((hdr[2] as usize) << 16)
+        | ((hdr[3] as usize) << 8)
+        | hdr[4] as usize;
+    if len < 4 || len - 4 > 512 {
+        return (-1, String::new());
+    }
+    let body = match recv_exact(&mut s, len - 4) {
+        Some(b) => b,
+        None => return (-1, String::new()),
+    };
+    let ok = hdr[0] == b'R' && len >= 8 && body[0] == 0 && body[1] == 0
+        && body[2] == 0 && body[3] == 0;
+    (if ok { 1 } else { 0 }, if ok { "OK" } else { "denied" }.to_string())
+}
+
+/* ---------------------------------------------------------------- */
+/* MySQL (arsenal_mysql.h)                                          */
+/* ---------------------------------------------------------------- */
+
+pub fn mysql_read_packet(stream: &mut TcpStream, cap: usize) -> Option<Vec<u8>> {
+    let hdr = recv_exact(stream, 4)?;
+    let len = (hdr[0] as usize) | ((hdr[1] as usize) << 8) | ((hdr[2] as usize) << 16);
+    if len + 1 > cap {
+        return None;
+    }
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    recv_exact(stream, len)
+}
+
+fn mysql_send_packet(stream: &mut TcpStream, payload: &[u8], seq: u8) -> std::io::Result<()> {
+    if payload.len() > 0xFF_FFFF {
+        return Err(std::io::Error::new(ErrorKind::InvalidInput, "packet too big"));
+    }
+    let len = payload.len();
+    let hdr = [len as u8, (len >> 8) as u8, (len >> 16) as u8, seq];
+    send_all(stream, &hdr)?;
+    send_all(stream, payload)
+}
+
+/* Returns (stream, version, salt). */
+pub fn mysql_open(ctx: *mut AlScriptContext) -> Option<(TcpStream, String, Vec<u8>)> {
+    let mut s = connect_ctx(ctx)?;
+    let pkt = mysql_read_packet(&mut s, 2048)?;
+    if pkt.len() < 2 || pkt[0] != 10 {
+        return None;
+    }
+    let mut version = String::new();
+    let mut i = 0usize;
+    while 1 + i < pkt.len() && pkt[1 + i] != 0 && i + 1 < 256 {
+        version.push(pkt[1 + i] as char);
+        i += 1;
+    }
+    version = clean(&version);
+    let mut off = 1 + i + 1 + 4;
+    let mut salt = Vec::new();
+    if off + 8 <= pkt.len() {
+        salt.extend_from_slice(&pkt[off..off + 8]);
+    }
+    let _ = &mut off;
+    Some((s, version, salt))
+}
+
+pub fn mysql_login(
+    stream: &mut TcpStream,
+    user: &str,
+    pass: &str,
+    empty: bool,
+) -> (i32, String) {
+    let caps: u32 = 0x000A_A201;
+    let ulen = user.len();
+    if ulen > 200 {
+        return (-1, String::new());
+    }
+    let mut plen = if empty { 0 } else { pass.len() };
+    if !empty && plen > 20 {
+        plen = 20;
+    }
+    let mut pkt = Vec::with_capacity(128);
+    pkt.push((caps & 255) as u8);
+    pkt.push(((caps >> 8) & 255) as u8);
+    pkt.push(((caps >> 16) & 255) as u8);
+    pkt.push(((caps >> 24) & 255) as u8);
+    pkt.extend_from_slice(&[0, 0, 0, 1, 33]);
+    pkt.extend_from_slice(&[0u8; 23]);
+    pkt.extend_from_slice(user.as_bytes());
+    pkt.push(0);
+    pkt.push(if empty { 0 } else { 20 });
+    if !empty {
+        pkt.extend_from_slice(&[0x41u8; 20]);
+    }
+    pkt.extend_from_slice(b"mysql_native_password");
+    pkt.push(0);
+    let _ = plen;
+    if mysql_send_packet(stream, &pkt, 1).is_err() {
+        return (-1, String::new());
+    }
+    let resp = match mysql_read_packet(stream, 2048) {
+        Some(r) => r,
+        None => return (-1, String::new()),
+    };
+    if resp.is_empty() {
+        return (-1, String::new());
+    }
+    if resp[0] == 0x00 {
+        return (0, "OK".to_string());
+    }
+    if resp[0] == 0xFF {
+        let code = if resp.len() >= 3 {
+            (resp[1] as i32) | ((resp[2] as i32) << 8)
+        } else {
+            0
+        };
+        let msg = if resp.len() > 3 {
+            clean(&String::from_utf8_lossy(&resp[3..]))
+        } else {
+            String::new()
+        };
+        return (code, msg);
+    }
+    (-1, format!("unexpected response 0x{:02x}", resp[0]))
+}
+
+/* ---------------------------------------------------------------- */
+/* Oracle TNS (arsenal_oracle.h)                                    */
+/* ---------------------------------------------------------------- */
+
+pub fn oracle_tns(
+    ctx: *mut AlScriptContext,
+    connect_data: &str,
+    cap: usize,
+) -> Option<(String, usize)> {
+    if !ctx_check(ctx) {
+        return None;
+    }
+    let ip = ip_text(ctx);
+    let port = unsafe { (*ctx).port };
+    let desc = format!(
+        "(DESCRIPTION=(CONNECT_DATA={})(ADDRESS=(PROTOCOL=TCP)(HOST={})(PORT={})))",
+        connect_data, ip, port
+    );
+    let dlen = desc.len();
+    let total = 58 + dlen;
+    let mut pkt = vec![0u8; total];
+    pkt[0] = (total >> 8) as u8;
+    pkt[1] = (total & 255) as u8;
+    pkt[4] = 1;
+    pkt[8] = 0x01;
+    pkt[9] = 0x36;
+    pkt[10] = 0x01;
+    pkt[11] = 0x2C;
+    pkt[18] = 0x00;
+    pkt[19] = 0x01;
+    pkt[20] = (dlen >> 8) as u8;
+    pkt[21] = (dlen & 255) as u8;
+    pkt[22] = 0x00;
+    pkt[23] = 0x3A;
+    pkt[26] = 0x00;
+    pkt[27] = 0x01;
+    pkt[58..58 + dlen].copy_from_slice(desc.as_bytes());
+    let mut s = connect_ctx(ctx)?;
+    send_all(&mut s, &pkt).ok()?;
+    let r = recv_all(&mut s, cap);
+    if r.is_empty() {
+        return None;
+    }
+    let text = clean(&String::from_utf8_lossy(&r));
+    Some((text, r.len()))
+}
+
+/* ---------------------------------------------------------------- */
+/* SNMPv2c (arsenal_snmp.h)                                         */
+/* ---------------------------------------------------------------- */
+
+fn ber_len(out: &mut Vec<u8>, len: usize) {
+    if len < 128 {
+        out.push(len as u8);
+    } else if len < 256 {
+        out.push(0x81);
+        out.push(len as u8);
+    } else {
+        out.push(0x82);
+        out.push((len >> 8) as u8);
+        out.push((len & 255) as u8);
+    }
+}
+
+fn ber_tlv(tag: u8, val: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(val.len() + 4);
+    out.push(tag);
+    ber_len(&mut out, val.len());
+    out.extend_from_slice(val);
+    out
+}
+
+fn ber_int(v: u32) -> Vec<u8> {
+    let mut tmp = Vec::new();
+    let mut x = v;
+    if x == 0 {
+        tmp.push(0);
+    } else {
+        while x > 0 {
+            tmp.push((x & 255) as u8);
+            x >>= 8;
+        }
+    }
+    if tmp.len() > 1 && (tmp[tmp.len() - 1] & 0x80) != 0 {
+        tmp.push(0);
+    }
+    tmp.reverse();
+    ber_tlv(0x02, &tmp)
+}
+
+fn ber_oid(oid: &str) -> Option<Vec<u8>> {
+    let mut parts = Vec::new();
+    for seg in oid.split('.') {
+        if seg.is_empty() {
+            continue;
+        }
+        parts.push(seg.parse::<u32>().ok()?);
+        if parts.len() > 32 {
+            return None;
+        }
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut tmp = vec![(parts[0] * 40 + parts[1]) as u8];
+    for &v in &parts[2..] {
+        let mut stack = Vec::new();
+        let mut x = v;
+        loop {
+            stack.push((x & 0x7F) as u8);
+            x >>= 7;
+            if x == 0 {
+                break;
+            }
+        }
+        while let Some(mut b) = stack.pop() {
+            if !stack.is_empty() {
+                b |= 0x80;
+            }
+            tmp.push(b);
+        }
+    }
+    Some(ber_tlv(0x06, &tmp))
+}
+
+fn snmp_make_get(community: &str, oid: &str) -> Option<Vec<u8>> {
+    let oidbuf = ber_oid(oid)?;
+    let nullbuf = ber_tlv(0x05, &[]);
+    let mut vbcontent = oidbuf;
+    vbcontent.extend_from_slice(&nullbuf);
+    let varbind = ber_tlv(0x30, &vbcontent);
+    let vblist = ber_tlv(0x30, &varbind);
+    let mut pducontent = ber_int(1);
+    pducontent.extend_from_slice(&ber_int(0));
+    pducontent.extend_from_slice(&ber_int(0));
+    pducontent.extend_from_slice(&vblist);
+    let pdu = ber_tlv(0xA0, &pducontent);
+    let mut msgcontent = ber_int(1);
+    msgcontent.extend_from_slice(&ber_tlv(0x04, community.as_bytes()));
+    msgcontent.extend_from_slice(&pdu);
+    Some(ber_tlv(0x30, &msgcontent))
+}
+
+fn ber_read_tlv(p: &[u8]) -> Option<(u8, usize, usize, usize)> {
+    if p.len() < 2 {
+        return None;
+    }
+    let tag = p[0];
+    let (l, o) = if p[1] & 0x80 == 0 {
+        (p[1] as usize, 2usize)
+    } else {
+        let n = (p[1] & 0x7F) as usize;
+        if n < 1 || n > 3 || p.len() < 2 + n {
+            return None;
+        }
+        let mut l = 0usize;
+        for i in 0..n {
+            l = (l << 8) | p[2 + i] as usize;
+        }
+        (l, 2 + n)
+    };
+    if o + l > p.len() {
+        return None;
+    }
+    Some((tag, o, l, o + l))
+}
+
+fn snmp_format_value(tag: u8, v: &[u8]) -> String {
+    let mut out = String::new();
+    if tag == 0x04 {
+        out.push_str(&String::from_utf8_lossy(v));
+    } else if tag == 0x06 {
+        let mut x = 0u32;
+        let mut first = true;
+        for b in v {
+            x = (x << 7) | (*b & 0x7F) as u32;
+            if b & 0x80 == 0 {
+                if first {
+                    out.push_str(&format!("{}.{}", x / 40, x % 40));
+                    first = false;
+                } else {
+                    out.push_str(&format!(".{}", x));
+                }
+                x = 0;
+            }
+        }
+    } else if tag == 0x02 || tag == 0x41 || tag == 0x42 || tag == 0x43 {
+        let mut x = 0u32;
+        for b in v {
+            x = (x << 8) | *b as u32;
+        }
+        out.push_str(&format!("{}", x));
+    } else {
+        out.push_str(&format!("tag 0x{:02x} len {}", tag, v.len()));
+    }
+    clean(&out)
+}
+
+pub fn snmp_get(ctx: *mut AlScriptContext, community: &str, oid: &str) -> Option<String> {
+    let req = snmp_make_get(community, oid)?;
+    let resp = udp_exchange(ctx, &req, 2048)?;
+    if resp.is_empty() {
+        return None;
+    }
+    let (tag, _o, vl, _c) = ber_read_tlv(&resp)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let inner = &resp[resp.len() - vl..];
+    let mut off = 0usize;
+    for i in 0..3 {
+        if off >= inner.len() {
+            break;
+        }
+        let (t, vo, l, c) = ber_read_tlv(&inner[off..])?;
+        if i == 2 && t == 0xA2 {
+            let pdu = &inner[off + vo..off + vo + l];
+            let mut po = 0usize;
+            for j in 0..4 {
+                if po >= pdu.len() {
+                    break;
+                }
+                let (pt, pvo, pl, pc) = ber_read_tlv(&pdu[po..])?;
+                if j == 3 && pt == 0x30 {
+                    let vb = &pdu[po + pvo..po + pvo + pl];
+                    let (_t1, o1, _l1, _c1) = ber_read_tlv(vb)?;
+                    let (_t2, o2, l2, _c2) = ber_read_tlv(&vb[o1..])?;
+                    if o1 + o2 + l2 > vb.len() {
+                        return None;
+                    }
+                    let (vt, vo2, vll, _vc) = ber_read_tlv(&vb[o1 + o2..])?;
+                    let vstart = o1 + o2 + vo2;
+                    if vstart + vll > vb.len() {
+                        return None;
+                    }
+                    return Some(snmp_format_value(vt, &vb[vstart..vstart + vll]));
+                }
+                po += pc;
+            }
+        }
+        off += c;
+    }
+    None
+}
+
+/* ---------------------------------------------------------------- */
+/* VNC / RFB (arsenal_vnc.h)                                        */
+/* ---------------------------------------------------------------- */
+
+fn vnc_open(ctx: *mut AlScriptContext) -> Option<(TcpStream, i32, [u8; 16])> {
+    let mut s = connect_ctx(ctx)?;
+    let ver = recv_exact(&mut s, 12)?;
+    if &ver[0..4] != b"RFB " {
+        return None;
+    }
+    send_all(&mut s, b"RFB 003.008\n").ok()?;
+    let mut challenge = [0u8; 16];
+    let sectype;
+    if ver[4] == b'0' && ver[5] == b'0' && ver[6] == b'3'
+        && ver[8] == b'0' && ver[9] == b'0' && ver[10] < b'8'
+    {
+        let b = recv_exact(&mut s, 4)?;
+        sectype = ((b[0] as i32) << 24) | ((b[1] as i32) << 16)
+            | ((b[2] as i32) << 8) | b[3] as i32;
+    } else {
+        let b = recv_exact(&mut s, 1)?;
+        let n = b[0] as usize;
+        if n == 0 {
+            return None;
+        }
+        let types = recv_exact(&mut s, n)?;
+        let mut sel = 0i32;
+        for t in types.iter() {
+            if *t == 2 {
+                sel = 2;
+                break;
+            }
+            if *t == 1 && sel == 0 {
+                sel = 1;
+            }
+        }
+        if sel == 0 {
+            return None;
+        }
+        sectype = sel;
+        send_all(&mut s, &[sel as u8]).ok()?;
+    }
+    if sectype == 2 {
+        let c = recv_exact(&mut s, 16)?;
+        challenge.copy_from_slice(&c);
+    }
+    Some((s, sectype, challenge))
+}
+
+fn vnc_result(stream: &mut TcpStream) -> i32 {
+    match recv_exact(stream, 4) {
+        Some(r) => ((r[0] as i32) << 24) | ((r[1] as i32) << 16)
+            | ((r[2] as i32) << 8) | r[3] as i32,
+        None => -1,
+    }
+}
+
+/* Returns (rc, sectype): 1 = valid, 0 = invalid, 2 = no auth needed,
+ * -1 = protocol error. */
+pub fn vnc_try_password(ctx: *mut AlScriptContext, pass: &str) -> (i32, i32) {
+    let (mut s, sectype, challenge) = match vnc_open(ctx) {
+        Some(v) => v,
+        None => return (-1, 0),
+    };
+    if sectype == 1 {
+        return (2, sectype);
+    }
+    let mut key = [0u8; 8];
+    for (i, b) in pass.as_bytes().iter().take(8).enumerate() {
+        key[i] = des_reverse8(*b);
+    }
+    let mut resp = [0u8; 16];
+    des_encrypt_block(&key, &challenge[0..8], &mut resp[0..8]);
+    des_encrypt_block(&key, &challenge[8..16], &mut resp[8..16]);
+    if send_all(&mut s, &resp).is_err() {
+        return (-1, sectype);
+    }
+    if vnc_result(&mut s) == 0 {
+        (1, sectype)
+    } else {
+        (0, sectype)
+    }
+}
+
+/* ---------------------------------------------------------------- */
+/* MSSQL empty-credential login (arsenal_mssql.h)                   */
+/* ---------------------------------------------------------------- */
+
+fn mssql_set16(p: &mut [u8], v: u32) {
+    p[0] = (v >> 8) as u8;
+    p[1] = (v & 255) as u8;
+}
+
+fn mssql_set32(p: &mut [u8], v: u32) {
+    p[0] = (v >> 24) as u8;
+    p[1] = (v >> 16) as u8;
+    p[2] = (v >> 8) as u8;
+    p[3] = (v & 255) as u8;
+}
+
+fn mssql_ucs2(s: &str, out: &mut [u8]) -> i32 {
+    let b = s.as_bytes();
+    if b.len() * 2 + 2 > out.len() {
+        return -1;
+    }
+    for (i, c) in b.iter().enumerate() {
+        out[i * 2] = *c;
+        out[i * 2 + 1] = 0;
+    }
+    out[b.len() * 2] = 0;
+    out[b.len() * 2 + 1] = 0;
+    (b.len() * 2) as i32
+}
+
+fn mssql_field(login: &mut [u8], pair: usize, s: &str, voff: &mut usize) {
+    let base = 42 + pair * 4;
+    if s.is_empty() {
+        mssql_set16(&mut login[base..], 0);
+        mssql_set16(&mut login[base + 2..], 0);
+        return;
+    }
+    mssql_set16(&mut login[base..], *voff as u32);
+    mssql_set16(&mut login[base + 2..], s.len() as u32);
+    let n = mssql_ucs2(s, &mut login[*voff..]);
+    if n > 0 {
+        *voff += n as usize;
+    }
+}
+
+/* Returns (rc, msg): 0 = accepted, 1 = rejected, -1 = no TDS response. */
+pub fn mssql_empty_login(ctx: *mut AlScriptContext) -> (i32, String) {
+    let ip = ip_text(ctx);
+    let mut login = [0u8; 1024];
+    let mut voff = 100usize;
+    mssql_field(&mut login, 0, "ALMAP", &mut voff);
+    mssql_field(&mut login, 1, "sa", &mut voff);
+    mssql_field(&mut login, 2, "", &mut voff);
+    mssql_field(&mut login, 3, "ALmap", &mut voff);
+    mssql_field(&mut login, 4, &ip, &mut voff);
+    mssql_field(&mut login, 5, "", &mut voff);
+    mssql_field(&mut login, 6, "ALmap", &mut voff);
+    mssql_field(&mut login, 7, "", &mut voff);
+    mssql_field(&mut login, 8, "", &mut voff);
+    for b in login[78..84].iter_mut() {
+        *b = 0;
+    }
+    mssql_set16(&mut login[84..], 0);
+    mssql_set16(&mut login[86..], 0);
+    mssql_set16(&mut login[88..], 0);
+    mssql_set16(&mut login[90..], 0);
+    mssql_set16(&mut login[92..], 0);
+    mssql_set16(&mut login[94..], 0);
+    mssql_set32(&mut login[96..], 0);
+    mssql_set32(&mut login[4..], 0x7400_0004);
+    mssql_set32(&mut login[8..], 4096);
+    login[24] = 0xE0;
+    login[25] = 0x00;
+    login[26] = 0x00;
+    login[27] = 0x00;
+    login[28] = 0x03;
+    login[29] = 0x00;
+    login[30] = 0x00;
+    login[31] = 0x00;
+    mssql_set32(&mut login[0..], voff as u32);
+    let mut pkt = vec![0u8; 1200];
+    pkt[0] = 0x10;
+    pkt[1] = 0x01;
+    let total = voff + 8;
+    pkt[2] = (total >> 8) as u8;
+    pkt[3] = (total & 255) as u8;
+    pkt[4] = 0;
+    pkt[5] = 0;
+    pkt[6] = 1;
+    pkt[7] = 0;
+    pkt[8..8 + voff].copy_from_slice(&login[..voff]);
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, String::new()),
+    };
+    if send_all(&mut s, &pkt[..total]).is_err() {
+        return (-1, String::new());
+    }
+    let (typ, resp) = match mssql_read_packet(&mut s) {
+        Some(v) => v,
+        None => return (-1, String::new()),
+    };
+    if typ == 0x04 {
+        return (0, "login accepted".to_string());
+    }
+    let mut i = 0usize;
+    while i + 9 < resp.len() {
+        if resp[i] == 0xAA {
+            let mut mlen = ((resp[i + 7] as usize) << 8) | resp[i + 8] as usize;
+            if i + 9 + mlen > resp.len() {
+                mlen = resp.len() - i - 9;
+            }
+            let mut msg = String::new();
+            let mut k = 0usize;
+            while k < mlen {
+                msg.push(resp[i + 9 + k] as char);
+                k += 2;
+            }
+            return (1, clean(&msg));
+        }
+        i += 1;
+    }
+    (1, format!("login failed (TDS type 0x{:02x})", typ))
 }
