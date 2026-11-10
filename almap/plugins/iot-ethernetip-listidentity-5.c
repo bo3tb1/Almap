@@ -1,0 +1,29 @@
+/* iot-ethernetip-listidentity-5 - EtherNet/IP ListIdentity probe
+ * Use only on networks you own or have permission to scan.
+ */
+#include "arsenal_util.h"
+
+int almap_script_run(AlScriptContext *ctx) {
+    static const unsigned char req[] = {
+        0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    char resp[2048];
+    int n;
+
+    if (!ar_valid(ctx)) {
+        return 1;
+    }
+    n = as_udp_exchange(ctx, req, sizeof(req), resp, sizeof(resp),
+                        ctx->timeout_ms);
+    if (n <= 0) {
+        ar_out(ctx, "iot-ethernetip-listidentity-5: no UDP reply");
+        return 0;
+    }
+    if (n >= 2 && (unsigned char)resp[0] == 0x63) {
+        ar_out(ctx, "iot-ethernetip-listidentity-5: expected reply seen (%d bytes)", n);
+    } else {
+        ar_out(ctx, "iot-ethernetip-listidentity-5: unexpected reply (%d bytes)", n);
+    }
+    return 0;
+}
