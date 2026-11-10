@@ -73,6 +73,31 @@ pub fn set_out(ctx: *mut AlScriptContext, s: &str) {
     }
 }
 
+/* Append text to the current output buffer without clearing it. */
+pub fn append_out(ctx: *mut AlScriptContext, s: &str) {
+    if ctx.is_null() {
+        return;
+    }
+    unsafe {
+        let c = &*ctx;
+        if c.output_buf.is_null() || c.output_max < 2 {
+            return;
+        }
+        let cap = c.output_max as usize - 1;
+        let p = c.output_buf as *const u8;
+        let mut len = 0usize;
+        while len < cap && *p.add(len) != 0 {
+            len += 1;
+        }
+        let bytes = s.as_bytes();
+        let room = cap - len;
+        let n = if bytes.len() < room { bytes.len() } else { room };
+        let dst = std::slice::from_raw_parts_mut(c.output_buf as *mut u8, len + n + 1);
+        dst[len..len + n].copy_from_slice(&bytes[..n]);
+        dst[len + n] = 0;
+    }
+}
+
 pub fn trim(s: &str) -> String {
     s.trim_matches(|c| c == ' ' || c == '\t' || c == '\r' || c == '\n')
         .to_string()
