@@ -139,6 +139,35 @@ pub fn send_all(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
     stream.write_all(data)
 }
 
+pub fn ip_text(ctx: *mut AlScriptContext) -> String {
+    if ctx.is_null() {
+        return String::new();
+    }
+    let ip = unsafe { (*ctx).target_ip };
+    Ipv4Addr::from(ip).to_string()
+}
+
+/* Send one UDP datagram to (ctx->target_ip, ctx->port) and return the
+ * first reply, mirroring as_udp_exchange(). */
+pub fn udp_exchange(ctx: *mut AlScriptContext, req: &[u8], cap: usize) -> Option<Vec<u8>> {
+    if !ctx_check(ctx) || req.is_empty() || cap < 2 {
+        return None;
+    }
+    let c = unsafe { &*ctx };
+    let ip = Ipv4Addr::from(c.target_ip);
+    let addr = SocketAddr::new(IpAddr::V4(ip), c.port as u16);
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    let to = timeout_of(ctx);
+    let _ = sock.set_read_timeout(Some(to));
+    let _ = sock.set_write_timeout(Some(to));
+    sock.connect(addr).ok()?;
+    sock.send(req).ok()?;
+    let mut buf = vec![0u8; cap - 1];
+    let n = sock.recv(&mut buf).ok()?;
+    buf.truncate(n);
+    Some(buf)
+}
+
 /* Read until EOF / timeout / cap-1 bytes, mirroring as_recv_all(). */
 pub fn recv_all(stream: &mut TcpStream, cap: usize) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
@@ -196,6 +225,30 @@ pub fn recv_line(stream: &mut TcpStream, cap: usize) -> String {
 /* ---------------------------------------------------------------- */
 /* HTTP (arsenal_util.h)                                            */
 /* ---------------------------------------------------------------- */
+
+/* Extract a header value (case-insensitive name, line-anchored). */
+pub fn http_header(resp: &str, name: &str) -> Option<String> {
+    let nlen = name.len();
+    let nb = name.as_bytes();
+    for raw in resp.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let lb = line.as_bytes();
+        if lb.len() > nlen && lb[nlen] == b':' {
+            let mut eq = true;
+            for i in 0..nlen {
+                if lb[i].to_ascii_lowercase() != nb[i].to_ascii_lowercase() {
+                    eq = false;
+                    break;
+                }
+            }
+            if eq {
+                let v = &line[nlen + 1..];
+                return Some(clean(v.trim_matches(|c| c == ' ' || c == '\t')));
+            }
+        }
+    }
+    None
+}
 
 pub fn http_body(resp: &str) -> &str {
     if let Some(i) = resp.find("\r\n\r\n") {
@@ -1026,4 +1079,138 @@ pub fn dns_dump_answers(out: &mut String, resp: &[u8], max: usize) -> usize {
         off += rdlen;
     }
     printed
+}
+
+/* ---------------------------------------------------------------- */
+/* SMB Tree Connect (arsenal_smb.h)                                 */
+/* ---------------------------------------------------------------- */
+
+/* Returns (status, tid). status == 0 means the share is accessible. */
+pub fn smb1_tree_connect(
+    stream: &mut TcpStream,
+    uid: u32,
+    server: &str,
+    share: &str,
+    service: &str,
+) -> (i32, u32) {
+    let path = format!("\\\\{}\\{}", server, share);
+    let pathb = path.as_bytes();
+    let pathlen = pathb.len() + 1;
+    let svcb = service.as_bytes();
+    let servicelen = svcb.len() + 1;
+    let bodylen = 32 + 1 + 8 + 2 + pathlen + servicelen;
+    if bodylen > 508 {
+        return (-1, 0);
+    }
+    let mut req = vec![0u8; 4 + bodylen];
+    req[3] = bodylen as u8;
+    let smb = &mut req[4..];
+    smb[0] = 0xFF;
+    smb[1] = b'S';
+    smb[2] = b'M';
+    smb[3] = b'B';
+    smb[4] = 0x75;
+    smb[9] = 0x18;
+    smb[10] = 0x53;
+    smb[11] = 0xC8;
+    smb[26] = 0xFE;
+    smb[27] = 0xFF;
+    smb[28] = (uid >> 8) as u8;
+    smb[29] = (uid & 255) as u8;
+    smb[32] = 4;
+    smb[33] = 0xFF;
+    smb[41] = ((pathlen + servicelen) & 255) as u8;
+    smb[42] = (((pathlen + servicelen) >> 8) & 255) as u8;
+    smb[43..43 + pathlen - 1].copy_from_slice(pathb);
+    smb[43 + pathlen - 1] = 0;
+    smb[43 + pathlen..43 + pathlen + servicelen - 1].copy_from_slice(svcb);
+    smb[43 + pathlen + servicelen - 1] = 0;
+    if send_all(stream, &req).is_err() {
+        return (-1, 0);
+    }
+    let resp = match smb_recv_nb(stream, 1024) {
+        Some(r) => r,
+        None => return (-1, 0),
+    };
+    if resp.len() < 32 {
+        return (-1, 0);
+    }
+    let status = be32(&resp[5..9]) as i32;
+    let tid = if status == 0 {
+        ((resp[24] as u32) << 8) | resp[25] as u32
+    } else {
+        0
+    };
+    (status, tid)
+}
+
+/* ---------------------------------------------------------------- */
+/* MSSQL / TDS 7.x (arsenal_mssql.h)                                */
+/* ---------------------------------------------------------------- */
+
+fn mssql_read_packet(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
+    let hdr = recv_exact(stream, 8)?;
+    let typ = hdr[0];
+    let len = ((hdr[2] as usize) << 8) | hdr[3] as usize;
+    if len < 8 {
+        return None;
+    }
+    let body = len - 8;
+    if body == 0 {
+        return Some((typ, Vec::new()));
+    }
+    let data = recv_exact(stream, body)?;
+    Some((typ, data))
+}
+
+/* Returns (version, instance) from the TDS prelogin response. */
+pub fn mssql_prelogin(ctx: *mut AlScriptContext) -> Option<(String, String)> {
+    if !ctx_check(ctx) {
+        return None;
+    }
+    let total: usize = 8 + 18;
+    let mut pkt = [0u8; 26];
+    pkt[0] = 0x12;
+    pkt[1] = 0x01;
+    pkt[2] = (total >> 8) as u8;
+    pkt[3] = (total & 255) as u8;
+    pkt[6] = 1;
+    pkt[10] = 0x0B;
+    pkt[12] = 0x06;
+    pkt[13] = 0x01;
+    pkt[15] = 0x11;
+    pkt[17] = 0x01;
+    pkt[18] = 0xFF;
+    pkt[19] = 0x0F;
+    pkt[21] = 0x07;
+    pkt[22] = 0xD0;
+    let mut s = connect_ctx(ctx)?;
+    send_all(&mut s, &pkt[..total]).ok()?;
+    let (typ, resp) = mssql_read_packet(&mut s)?;
+    if typ != 0x04 || resp.is_empty() {
+        return None;
+    }
+    let n = resp.len();
+    let mut version = String::new();
+    let mut instance = String::new();
+    let mut off = 0usize;
+    while off + 5 <= n && resp[off] != 0xFF {
+        let opt = resp[off];
+        let o = ((resp[off + 1] as usize) << 8) | resp[off + 2] as usize;
+        let l = ((resp[off + 3] as usize) << 8) | resp[off + 4] as usize;
+        off += 5;
+        if o + l > n {
+            continue;
+        }
+        if opt == 0x00 && l >= 6 {
+            let major = resp[o];
+            let minor = resp[o + 1];
+            let build = ((resp[o + 2] as u32) << 8) | resp[o + 3] as u32;
+            let sub = ((resp[o + 4] as u32) << 8) | resp[o + 5] as u32;
+            version = format!("{}.{}.{}.{}", major, minor, build, sub);
+        } else if opt == 0x02 && l > 0 {
+            instance = clean(&String::from_utf8_lossy(&resp[o..o + l]));
+        }
+    }
+    Some((version, instance))
 }
