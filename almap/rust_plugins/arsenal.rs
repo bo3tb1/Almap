@@ -833,6 +833,7 @@ pub const DNS_PTR: u16 = 12;
 pub const DNS_MX: u16 = 15;
 pub const DNS_TXT: u16 = 16;
 pub const DNS_AAAA: u16 = 28;
+pub const DNS_AXFR: u16 = 252;
 
 fn dns_encode_name(name: &str, out: &mut Vec<u8>, cap: usize) -> Option<usize> {
     let start = out.len();
@@ -854,7 +855,7 @@ fn dns_encode_name(name: &str, out: &mut Vec<u8>, cap: usize) -> Option<usize> {
     Some(out.len() - start)
 }
 
-fn dns_make_query(name: &str, qtype: u16, flags: u16) -> Option<Vec<u8>> {
+pub fn dns_make_query(name: &str, qtype: u16, flags: u16) -> Option<Vec<u8>> {
     let id = (SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -900,6 +901,47 @@ pub fn dns_udp(
     let n = sock.recv(&mut buf).ok()?;
     buf.truncate(n);
     Some(buf)
+}
+
+/* Send a DNS query over TCP with the two-byte length prefix. */
+pub fn dns_tcp_send(stream: &mut TcpStream, query: &[u8]) -> bool {
+    if query.is_empty() || query.len() > 65535 {
+        return false;
+    }
+    let mut frame = Vec::with_capacity(query.len() + 2);
+    frame.push((query.len() >> 8) as u8);
+    frame.push((query.len() & 255) as u8);
+    frame.extend_from_slice(query);
+    send_all(stream, &frame).is_ok()
+}
+
+/* Receive one length-prefixed DNS message over TCP. */
+pub fn dns_tcp_recv(stream: &mut TcpStream, cap: usize) -> Option<Vec<u8>> {
+    if cap < 12 {
+        return None;
+    }
+    let hdr = recv_exact(stream, 2)?;
+    let len = ((hdr[0] as usize) << 8) | hdr[1] as usize;
+    if len < 12 || len > cap {
+        return None;
+    }
+    recv_exact(stream, len)
+}
+
+/* One DNS-over-TCP query/reply exchange, mirroring ar_dns_tcp_query(). */
+pub fn dns_tcp_query(
+    ctx: *mut AlScriptContext,
+    name: &str,
+    qtype: u16,
+    flags: u16,
+    cap: usize,
+) -> Option<Vec<u8>> {
+    let query = dns_make_query(name, qtype, flags)?;
+    let mut stream = connect_ctx(ctx)?;
+    if !dns_tcp_send(&mut stream, &query) {
+        return None;
+    }
+    dns_tcp_recv(&mut stream, cap)
 }
 
 pub fn dns_rcode(resp: &[u8]) -> i32 {
