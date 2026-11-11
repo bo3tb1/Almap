@@ -1615,3 +1615,249 @@ pub fn vnc_try_password(ctx: *mut AlScriptContext, pass: &str) -> i32 {
         0
     }
 }
+
+/* ---------------------------------------------------------------- */
+/* MySQL (arsenal_mysql.h)                                          */
+/* ---------------------------------------------------------------- */
+
+fn mysql_read_packet(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let hdr = recv_exact(stream, 4)?;
+    let len = (hdr[0] as usize) | ((hdr[1] as usize) << 8) | ((hdr[2] as usize) << 16);
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    recv_exact(stream, len)
+}
+
+fn mysql_send_packet(stream: &mut TcpStream, payload: &[u8], seq: u8) -> bool {
+    let len = payload.len();
+    if len > 0xFF_FFFF {
+        return false;
+    }
+    let hdr = [
+        (len & 255) as u8,
+        ((len >> 8) & 255) as u8,
+        ((len >> 16) & 255) as u8,
+        seq,
+    ];
+    send_all(stream, &hdr).is_ok() && send_all(stream, payload).is_ok()
+}
+
+/* Connect and read the MySQL initial handshake; returns (stream, version). */
+pub fn mysql_open(ctx: *mut AlScriptContext) -> Option<(TcpStream, String)> {
+    let mut s = connect_ctx(ctx)?;
+    let pkt = mysql_read_packet(&mut s)?;
+    if pkt.len() < 2 || pkt[0] != 10 {
+        return None;
+    }
+    let mut i = 1usize;
+    while i < pkt.len() && pkt[i] != 0 {
+        i += 1;
+    }
+    let version = clean(&String::from_utf8_lossy(&pkt[1..i]));
+    Some((s, version))
+}
+
+/* Attempt a login. Returns 0 on OK, the MySQL error code on an error
+ * packet, or -1 on I/O / unexpected reply. */
+pub fn mysql_login(stream: &mut TcpStream, user: &str, pass: &str, empty: bool) -> i32 {
+    let caps: u32 = 0x000A_A201;
+    let ulen = user.len();
+    if ulen > 200 {
+        return -1;
+    }
+    let mut plen = if empty { 0 } else { pass.len() };
+    if !empty && plen > 20 {
+        plen = 20;
+    }
+    let _ = plen;
+    let mut pkt: Vec<u8> = Vec::new();
+    pkt.extend_from_slice(&caps.to_le_bytes());
+    pkt.extend_from_slice(&[0, 0, 0, 1]);
+    pkt.push(33);
+    pkt.extend_from_slice(&[0u8; 23]);
+    pkt.extend_from_slice(user.as_bytes());
+    pkt.push(0);
+    pkt.push(if empty { 0 } else { 20 });
+    if !empty {
+        /* Deterministic non-matching scramble; a probe, not a credential. */
+        pkt.extend_from_slice(&[0x41u8; 20]);
+    }
+    pkt.extend_from_slice(b"mysql_native_password");
+    pkt.push(0);
+    pkt.push(0);
+
+    if !mysql_send_packet(stream, &pkt, 1) {
+        return -1;
+    }
+    let resp = match mysql_read_packet(stream) {
+        Some(r) if !r.is_empty() => r,
+        _ => return -1,
+    };
+    if resp[0] == 0x00 {
+        return 0;
+    }
+    if resp[0] == 0xFF {
+        let mut code = 0i32;
+        if resp.len() >= 3 {
+            code = resp[1] as i32 | ((resp[2] as i32) << 8);
+        }
+        return code;
+    }
+    -1
+}
+
+/* ---------------------------------------------------------------- */
+/* MSSQL blank-password login (arsenal_mssql.h)                     */
+/* ---------------------------------------------------------------- */
+
+fn mssql_set16(p: &mut [u8], off: usize, v: u16) {
+    p[off] = (v & 255) as u8;
+    p[off + 1] = ((v >> 8) & 255) as u8;
+}
+
+fn mssql_set32(p: &mut [u8], off: usize, v: u32) {
+    p[off] = (v & 255) as u8;
+    p[off + 1] = ((v >> 8) & 255) as u8;
+    p[off + 2] = ((v >> 16) & 255) as u8;
+    p[off + 3] = ((v >> 24) & 255) as u8;
+}
+
+fn mssql_field(login: &mut [u8], pair: usize, s: &str, voff: &mut usize) {
+    let base = 42 + pair * 4;
+    let len = s.len();
+    if len == 0 {
+        mssql_set16(login, base, 0);
+        mssql_set16(login, base + 2, 0);
+        return;
+    }
+    mssql_set16(login, base, *voff as u16);
+    mssql_set16(login, base + 2, len as u16);
+    let start = *voff;
+    for (i, b) in s.bytes().enumerate() {
+        login[start + i * 2] = b;
+        login[start + i * 2 + 1] = 0;
+    }
+    *voff += len * 2;
+}
+
+/* Returns (rc, message): 0 accepted, 1 rejected, -1 no response. */
+pub fn mssql_empty_login(ctx: *mut AlScriptContext) -> (i32, String) {
+    if !ctx_check(ctx) {
+        return (-1, String::new());
+    }
+    let ip = ip_text(ctx);
+    let mut login = vec![0u8; 1024];
+    let mut voff = 100usize;
+    mssql_field(&mut login, 0, "ALMAP", &mut voff);
+    mssql_field(&mut login, 1, "sa", &mut voff);
+    mssql_field(&mut login, 2, "", &mut voff);
+    mssql_field(&mut login, 3, "ALmap", &mut voff);
+    mssql_field(&mut login, 4, &ip, &mut voff);
+    mssql_field(&mut login, 5, "", &mut voff);
+    mssql_field(&mut login, 6, "ALmap", &mut voff);
+    mssql_field(&mut login, 7, "", &mut voff);
+    mssql_field(&mut login, 8, "", &mut voff);
+
+    mssql_set32(&mut login, 4, 0x7400_0004);
+    mssql_set32(&mut login, 8, 4096);
+    login[24] = 0xE0;
+    login[28] = 0x03;
+
+    let total = voff;
+    mssql_set32(&mut login, 0, total as u32);
+
+    let mut pkt = vec![0u8; 1200];
+    pkt[0] = 0x10;
+    pkt[1] = 0x01;
+    let total8 = total + 8;
+    pkt[2] = (total8 >> 8) as u8;
+    pkt[3] = (total8 & 255) as u8;
+    pkt[6] = 1;
+    pkt[8..8 + total].copy_from_slice(&login[..total]);
+
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, String::new()),
+    };
+    if send_all(&mut s, &pkt[..total8]).is_err() {
+        return (-1, String::new());
+    }
+    let (typ, resp) = match mssql_read_packet(&mut s) {
+        Some(v) => v,
+        None => return (-1, String::new()),
+    };
+    drop(s);
+    if typ == 0x04 {
+        return (0, "login accepted".to_string());
+    }
+    let n = resp.len();
+    let mut i = 0usize;
+    while i + 9 < n {
+        if resp[i] == 0xAA {
+            let mut mlen = ((resp[i + 7] as usize) << 8) | resp[i + 8] as usize;
+            if i + 9 + mlen > n {
+                mlen = n - i - 9;
+            }
+            let mut msg = String::new();
+            let mut k = 0usize;
+            while k < mlen {
+                msg.push(resp[i + 9 + k] as char);
+                k += 2;
+            }
+            return (1, clean(&msg));
+        }
+        i += 1;
+    }
+    (1, format!("login failed (TDS type 0x{:02x})", typ))
+}
+
+/* ---------------------------------------------------------------- */
+/* Oracle TNS CONNECT (arsenal_oracle.h)                            */
+/* ---------------------------------------------------------------- */
+
+pub fn oracle_tns(
+    ctx: *mut AlScriptContext,
+    connect_data: &str,
+    cap: usize,
+) -> Option<Vec<u8>> {
+    if !ctx_check(ctx) {
+        return None;
+    }
+    let ip = ip_text(ctx);
+    let port = unsafe { (*ctx).port };
+    let desc = format!(
+        "(DESCRIPTION=(CONNECT_DATA={})(ADDRESS=(PROTOCOL=TCP)(HOST={})(PORT={})))",
+        connect_data, ip, port
+    );
+    let dlen = desc.len();
+    let total = 58 + dlen;
+    if total > 1024 {
+        return None;
+    }
+    let mut pkt = vec![0u8; 1024];
+    pkt[0] = (total >> 8) as u8;
+    pkt[1] = (total & 255) as u8;
+    pkt[4] = 1; /* TNS CONNECT */
+    pkt[8] = 0x01;
+    pkt[9] = 0x36;
+    pkt[10] = 0x01;
+    pkt[11] = 0x2C;
+    pkt[18] = 0x00;
+    pkt[19] = 0x01;
+    pkt[20] = (dlen >> 8) as u8;
+    pkt[21] = (dlen & 255) as u8;
+    pkt[22] = 0x00;
+    pkt[23] = 0x3A;
+    pkt[26] = 0x00;
+    pkt[27] = 0x01;
+    pkt[58..58 + dlen].copy_from_slice(desc.as_bytes());
+
+    let mut s = connect_ctx(ctx)?;
+    send_all(&mut s, &pkt[..total]).ok()?;
+    let buf = recv_all(&mut s, cap);
+    if buf.is_empty() {
+        return None;
+    }
+    Some(buf)
+}
