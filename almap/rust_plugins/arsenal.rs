@@ -2453,3 +2453,131 @@ pub fn oracle_tns(
     }
     Some(buf)
 }
+
+/* ---------------------------------------------------------------- */
+/* PostgreSQL v3 startup / auth (arsenal_pgsql.h)                    */
+/* ---------------------------------------------------------------- */
+
+fn pg_startup_body(user: &str, db: &str) -> Vec<u8> {
+    let u = if user.is_empty() { "postgres" } else { user };
+    let d = if db.is_empty() { "postgres" } else { db };
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(b"user\0");
+    body.extend_from_slice(u.as_bytes());
+    body.push(0);
+    body.extend_from_slice(b"database\0");
+    body.extend_from_slice(d.as_bytes());
+    body.push(0);
+    body.push(0);
+    let total = (8 + body.len()) as u32;
+    let mut pkt: Vec<u8> = Vec::new();
+    pkt.extend_from_slice(&total.to_be_bytes());
+    pkt.extend_from_slice(&196608u32.to_be_bytes());
+    pkt.extend_from_slice(&body);
+    pkt
+}
+
+/* Mirrors ar_pg_start. Returns (rc, ssl): rc = 0 startup sent (stream
+ * returned), -2 server requires/offers SSL, -1 unreachable/error. */
+fn pg_start_stream(ctx: *mut AlScriptContext, user: &str, db: &str) -> (i32, bool, Option<TcpStream>) {
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, false, None),
+    };
+    let sslreq = [0u8, 0, 0, 8, 0x04, 0xD2, 0x16, 0x2F];
+    if send_all(&mut s, &sslreq).is_err() {
+        return (-1, false, None);
+    }
+    let b = match recv_exact(&mut s, 1) {
+        Some(v) => v,
+        None => return (-1, false, None),
+    };
+    if b[0] == b'S' {
+        return (-2, true, None);
+    }
+    if b[0] != b'N' {
+        return (-1, false, None);
+    }
+    let pkt = pg_startup_body(user, db);
+    if send_all(&mut s, &pkt).is_err() {
+        return (-1, false, None);
+    }
+    (0, false, Some(s))
+}
+
+/* Public: (rc, ssl) with the connection closed. rc: 0 ok, -2 ssl, -1 error. */
+pub fn pg_start(ctx: *mut AlScriptContext, user: &str, db: &str) -> (i32, bool) {
+    let (rc, ssl, _s) = pg_start_stream(ctx, user, db);
+    (rc, ssl)
+}
+
+fn pg_read_msg(stream: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
+    let hdr = recv_exact(stream, 5)?;
+    let len = ((hdr[1] as usize) << 24)
+        | ((hdr[2] as usize) << 16)
+        | ((hdr[3] as usize) << 8)
+        | hdr[4] as usize;
+    if len < 4 || len - 4 > 512 {
+        return None;
+    }
+    let body = if len - 4 > 0 {
+        recv_exact(stream, len - 4)?
+    } else {
+        Vec::new()
+    };
+    Some((hdr[0], body))
+}
+
+/* Mirrors ar_pg_login. Returns (rc, msg): 1 accepted, 0 denied/other, -1 error. */
+pub fn pg_login(ctx: *mut AlScriptContext, user: &str, pass: &str) -> (i32, String) {
+    let (rc, _ssl, stream) = pg_start_stream(ctx, user, "postgres");
+    if rc == -2 {
+        return (0, "SSL required".to_string());
+    }
+    let mut s = match stream {
+        Some(s) => s,
+        None => return (-1, String::new()),
+    };
+    let (tag, body) = match pg_read_msg(&mut s) {
+        Some(v) => v,
+        None => return (-1, String::new()),
+    };
+    if tag != b'R' {
+        return (0, format!("auth type {}", tag as char));
+    }
+    if body.len() < 4 {
+        return (-1, String::new());
+    }
+    let code = ((body[0] as u32) << 24)
+        | ((body[1] as u32) << 16)
+        | ((body[2] as u32) << 8)
+        | body[3] as u32;
+    if code == 0 {
+        return (1, "OK".to_string());
+    }
+    if code != 3 {
+        return (0, format!("auth code {}", code));
+    }
+    // Cleartext password request. The length field mirrors ar_pg_login's
+    // `o` exactly (it counts the type byte: 1 + 4 + passlen + 1 = 6 + passlen),
+    // so the wire bytes match the C probe one-for-one.
+    let mut pkt: Vec<u8> = Vec::new();
+    pkt.push(b'p');
+    let lenfield = (6 + pass.len()) as u32;
+    pkt.extend_from_slice(&lenfield.to_be_bytes());
+    pkt.extend_from_slice(pass.as_bytes());
+    pkt.push(0);
+    if send_all(&mut s, &pkt).is_err() {
+        return (-1, String::new());
+    }
+    let (tag2, body2) = match pg_read_msg(&mut s) {
+        Some(v) => v,
+        None => return (-1, String::new()),
+    };
+    let ok = tag2 == b'R' && body2.len() >= 4 && body2[0] == 0 && body2[1] == 0 && body2[2] == 0 && body2[3] == 0;
+    if ok {
+        (1, "OK".to_string())
+    } else {
+        (0, "denied".to_string())
+    }
+}
