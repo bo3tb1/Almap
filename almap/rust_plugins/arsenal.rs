@@ -1617,6 +1617,598 @@ pub fn vnc_try_password(ctx: *mut AlScriptContext, pass: &str) -> i32 {
 }
 
 /* ---------------------------------------------------------------- */
+/* SSH password auth (arsenal_ssh.h) - mirrors ar_ssh_auth_password  */
+/* ---------------------------------------------------------------- */
+
+pub fn ssh_auth_password(
+    stream: &mut TcpStream,
+    user: &str,
+    pass: &str,
+    cap: usize,
+) -> (i32, String) {
+    let ulen = user.len();
+    let plen = pass.len();
+    if ulen > 200 || plen > 400 {
+        return (-1, String::new());
+    }
+    let mut pkt = Vec::new();
+    pkt.push(SSH_MSG_USERAUTH_REQUEST);
+    ssh_put_u32(&mut pkt, ulen as u32);
+    pkt.extend_from_slice(user.as_bytes());
+    ssh_put_u32(&mut pkt, 14);
+    pkt.extend_from_slice(b"ssh-connection");
+    ssh_put_u32(&mut pkt, 8);
+    pkt.extend_from_slice(b"password");
+    pkt.push(0);
+    ssh_put_u32(&mut pkt, plen as u32);
+    pkt.extend_from_slice(pass.as_bytes());
+    if ssh_send_packet(stream, &pkt).is_err() {
+        return (-1, String::new());
+    }
+    let resp = match ssh_recv_packet(stream, 1024) {
+        Some(r) => r,
+        None => return (-1, String::new()),
+    };
+    if resp.is_empty() {
+        return (-1, String::new());
+    }
+    if resp[0] == SSH_MSG_USERAUTH_SUCCESS {
+        return (1, "password".to_string());
+    }
+    if resp[0] == SSH_MSG_USERAUTH_FAILURE && resp.len() >= 5 {
+        let mlen = ssh_get_u32(&resp[1..5]) as usize;
+        if mlen < cap && 5 + mlen <= resp.len() {
+            return (
+                0,
+                String::from_utf8_lossy(&resp[5..5 + mlen]).into_owned(),
+            );
+        }
+    }
+    (-1, String::new())
+}
+
+/* ---------------------------------------------------------------- */
+/* TLS record/handshake probes (arsenal_tls.h)                       */
+/*                                                                   */
+/* Faithful port: tls_read_record returns the record CONTENT (the    */
+/* 5-byte header is stripped), exactly as ar_tls_read_record did, so  */
+/* downstream indexing matches the C plugins byte-for-byte.           */
+/* ---------------------------------------------------------------- */
+
+pub const TLS_CCS: u8 = 20;
+pub const TLS_ALERT: u8 = 21;
+pub const TLS_HANDSHAKE: u8 = 22;
+pub const TLS_HEARTBEAT: u8 = 24;
+
+pub const TLS_CIPHERS: [u16; 24] = [
+    0xC02F, 0xC030, 0xC02B, 0xC02C, 0xCCA8, 0xCCA9, 0x009E, 0x009F, 0x002F, 0x0035, 0x003C, 0x003D,
+    0x000A, 0x0005, 0x0004, 0x0067, 0x006B, 0x0033, 0x0039, 0x0016, 0x0023, 0x0009, 0x0006, 0x0003,
+];
+
+pub const TLS_CBC_CIPHERS: [u16; 16] = [
+    0x002F, 0x0035, 0x003C, 0x003D, 0x000A, 0x0005, 0x0004, 0x0067, 0x006B, 0x0033, 0x0039, 0x0016,
+    0x0023, 0x0009, 0x0006, 0x0003,
+];
+
+pub fn tls_is_cbc(cipher: u16) -> bool {
+    TLS_CBC_CIPHERS.iter().any(|&c| c == cipher)
+}
+
+pub fn tls_cipher_name(c: u16) -> &'static str {
+    match c {
+        0xC02F => "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        0xC030 => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        0xC02B => "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+        0xC02C => "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+        0xCCA8 => "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305",
+        0xCCA9 => "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305",
+        0x009E => "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
+        0x009F => "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+        0x002F => "TLS_RSA_WITH_AES_128_CBC_SHA",
+        0x0035 => "TLS_RSA_WITH_AES_256_CBC_SHA",
+        0x003C => "TLS_RSA_WITH_AES_128_CBC_SHA256",
+        0x003D => "TLS_RSA_WITH_AES_256_CBC_SHA256",
+        0x000A => "TLS_RSA_WITH_3DES_EDE_CBC_SHA",
+        0x0005 => "TLS_RSA_WITH_RC4_128_SHA",
+        0x0004 => "TLS_RSA_WITH_RC4_128_MD5",
+        0x0067 => "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256",
+        0x006B => "TLS_DHE_RSA_WITH_AES_256_CBC_SHA256",
+        0x0033 => "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
+        0x0039 => "TLS_DHE_RSA_WITH_AES_256_CBC_SHA",
+        0x0016 => "TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA",
+        0x0023 => "TLS_DHE_DSS_WITH_AES_128_CBC_SHA",
+        0x0009 => "TLS_RSA_WITH_DES_CBC_SHA",
+        0x0006 => "TLS_RSA_EXPORT_WITH_RC4_40_MD5",
+        0x0003 => "TLS_RSA_EXPORT_WITH_RC4_40_MD5",
+        _ => "unknown",
+    }
+}
+
+pub fn tls_version_name(v: u16) -> &'static str {
+    match v {
+        0x0300 => "SSLv3",
+        0x0301 => "TLSv1.0",
+        0x0302 => "TLSv1.1",
+        0x0303 => "TLSv1.2",
+        0x0304 => "TLSv1.3",
+        _ => "unknown",
+    }
+}
+
+/* Build a ClientHello record (byte-for-byte port of ar_tls_client_hello). */
+fn tls_client_hello(version: u16, ciphers: &[u16], heartbeat: bool) -> Option<Vec<u8>> {
+    if ciphers.is_empty() {
+        return None;
+    }
+    let mut body: Vec<u8> = Vec::new();
+    body.push((version >> 8) as u8);
+    body.push((version & 0xff) as u8);
+    for i in 0..32u8 {
+        body.push(0x30 + i);
+    }
+    body.push(0); // session id length
+    let nc = ciphers.len();
+    body.push(((nc * 2) >> 8) as u8);
+    body.push(((nc * 2) & 0xff) as u8);
+    for &c in ciphers.iter() {
+        body.push((c >> 8) as u8);
+        body.push((c & 0xff) as u8);
+    }
+    body.push(1); // compression methods length
+    body.push(0); // null compression
+    let mut ext: Vec<u8> = Vec::new();
+    if version >= 0x0301 {
+        ext.extend_from_slice(&[
+            0x00, 0x0A, 0x00, 0x08, 0x00, 0x06, 0x00, 0x1D, 0x00, 0x17, 0x00, 0x18,
+        ]);
+        ext.extend_from_slice(&[0x00, 0x0B, 0x00, 0x02, 0x01, 0x00]);
+        ext.extend_from_slice(&[
+            0x00, 0x0D, 0x00, 0x0A, 0x00, 0x08, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01, 0x05, 0x01,
+        ]);
+        ext.extend_from_slice(&[0xFF, 0x01, 0x00, 0x01, 0x00]);
+        if heartbeat {
+            ext.extend_from_slice(&[0x00, 0x0F, 0x00, 0x01, 0x01]);
+        }
+    }
+    body.push((ext.len() >> 8) as u8);
+    body.push((ext.len() & 0xff) as u8);
+    body.extend_from_slice(&ext);
+    let b = body.len();
+    let mut out: Vec<u8> = Vec::new();
+    out.push(TLS_HANDSHAKE);
+    out.push((version >> 8) as u8);
+    out.push((version & 0xff) as u8);
+    out.push(((b + 4) >> 8) as u8);
+    out.push(((b + 4) & 0xff) as u8);
+    out.push(1); // handshake type: ClientHello
+    out.push((b >> 16) as u8);
+    out.push((b >> 8) as u8);
+    out.push((b & 0xff) as u8);
+    out.extend_from_slice(&body);
+    Some(out)
+}
+
+/* Read one TLS record; returns its CONTENT (header stripped), or None. */
+fn tls_read_record(stream: &mut TcpStream, cap: usize) -> Option<Vec<u8>> {
+    let hdr = recv_exact(stream, 5)?;
+    let len = ((hdr[3] as usize) << 8) | hdr[4] as usize;
+    if len + 1 > cap {
+        return None;
+    }
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    recv_exact(stream, len)
+}
+
+/* (version, cipher, sid_len) from ServerHello content, or None. */
+fn tls_parse_server_hello(p: &[u8]) -> Option<(u16, u16, usize)> {
+    let len = p.len();
+    if len < 40 || p[0] != 2 {
+        return None;
+    }
+    let version = ((p[4] as u16) << 8) | p[5] as u16;
+    let mut off = 6 + 32;
+    if off >= len {
+        return None;
+    }
+    let sid_len = p[off] as usize;
+    off += 1 + sid_len;
+    if off + 2 > len {
+        return None;
+    }
+    let cipher = ((p[off] as u16) << 8) | p[off + 1] as u16;
+    Some((version, cipher, sid_len))
+}
+
+/* (rc, selver, selcipher). rc: 1 handshake ok, 0 alert, -1 failure. */
+pub fn tls_probe(
+    ctx: *mut AlScriptContext,
+    version: u16,
+    ciphers: &[u16],
+    heartbeat: bool,
+) -> (i32, u16, u16) {
+    let hello = match tls_client_hello(version, ciphers, heartbeat) {
+        Some(h) => h,
+        None => return (-1, 0, 0),
+    };
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, 0, 0),
+    };
+    if send_all(&mut s, &hello).is_err() {
+        return (-1, 0, 0);
+    }
+    let rec = match tls_read_record(&mut s, 4096) {
+        Some(r) => r,
+        None => return (-1, 0, 0),
+    };
+    drop(s);
+    if !rec.is_empty() && rec[0] == TLS_ALERT {
+        return (0, 0, 0);
+    }
+    match tls_parse_server_hello(&rec) {
+        Some((v, c, _)) => (1, v, c),
+        None => (-1, 0, 0),
+    }
+}
+
+/* rc: 1 vulnerable, 0 not, -1 handshake failed. */
+pub fn tls_heartbleed(ctx: *mut AlScriptContext) -> i32 {
+    let hello = match tls_client_hello(0x0301, &TLS_CIPHERS, true) {
+        Some(h) => h,
+        None => return -1,
+    };
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return -1,
+    };
+    if send_all(&mut s, &hello).is_err() {
+        return -1;
+    }
+    let rec = match tls_read_record(&mut s, 4096) {
+        Some(r) if !r.is_empty() => r,
+        _ => return 0,
+    };
+    if rec[0] == TLS_ALERT {
+        return 0;
+    }
+    let ver = match tls_parse_server_hello(&rec) {
+        Some((v, _, _)) => v,
+        None => return 0,
+    };
+    let hb = [
+        TLS_HEARTBEAT,
+        (ver >> 8) as u8,
+        (ver & 0xff) as u8,
+        0,
+        3,
+        1,
+        0x40,
+        0x00,
+    ];
+    if send_all(&mut s, &hb).is_err() {
+        return 0;
+    }
+    match tls_read_record(&mut s, 4096) {
+        Some(r) if r.len() > 3 && r[0] == TLS_HEARTBEAT => 1,
+        _ => 0,
+    }
+}
+
+/* (rc, selver, selcipher). rc: 1 early-CCS accepted, 0 rejected, -1 failed. */
+pub fn tls_ccs_test(ctx: *mut AlScriptContext) -> (i32, u16, u16) {
+    let hello = match tls_client_hello(0x0303, &TLS_CIPHERS, false) {
+        Some(h) => h,
+        None => return (-1, 0, 0),
+    };
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, 0, 0),
+    };
+    if send_all(&mut s, &hello).is_err() {
+        return (-1, 0, 0);
+    }
+    let mut rec = match tls_read_record(&mut s, 4096) {
+        Some(r) if !r.is_empty() => r,
+        _ => return (-1, 0, 0),
+    };
+    let (ver, cipher, _) = match tls_parse_server_hello(&rec) {
+        Some(v) => v,
+        None => return (-1, 0, 0),
+    };
+    // Drain the server flight through ServerHelloDone (type 14).
+    for _ in 0..6 {
+        if !rec.is_empty() && rec[0] == TLS_ALERT {
+            return (0, ver, cipher);
+        }
+        if rec.len() >= 4 && rec[0] == 14 {
+            break;
+        }
+        match tls_read_record(&mut s, 4096) {
+            Some(r) if !r.is_empty() => rec = r,
+            _ => break,
+        }
+    }
+    let ccs = [TLS_CCS, 0x03, 0x01, 0x00, 0x01, 0x01];
+    if send_all(&mut s, &ccs).is_err() {
+        return (-1, ver, cipher);
+    }
+    match tls_read_record(&mut s, 4096) {
+        Some(r) if !r.is_empty() && r[0] != TLS_ALERT => (1, ver, cipher),
+        _ => (0, ver, cipher),
+    }
+}
+
+/* (rc, bits, group_len). rc: 0 ok (bits/group_len set), -1 handshake failed. */
+pub fn tls_dh_bits(ctx: *mut AlScriptContext) -> (i32, i32, u32) {
+    const DHE: [u16; 7] = [0x009E, 0x009F, 0x0067, 0x006B, 0x0033, 0x0039, 0x0016];
+    let hello = match tls_client_hello(0x0303, &DHE, false) {
+        Some(h) => h,
+        None => return (-1, 0, 0),
+    };
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return (-1, 0, 0),
+    };
+    if send_all(&mut s, &hello).is_err() {
+        return (-1, 0, 0);
+    }
+    let rec = match tls_read_record(&mut s, 4096) {
+        Some(r) if !r.is_empty() => r,
+        _ => return (-1, 0, 0),
+    };
+    if tls_parse_server_hello(&rec).is_none() {
+        return (-1, 0, 0);
+    }
+    let mut bits = 0i32;
+    let mut group_len = 0u32;
+    for _ in 0..4 {
+        let rec = match tls_read_record(&mut s, 4096) {
+            Some(r) if !r.is_empty() => r,
+            _ => break,
+        };
+        if rec[0] != 12 {
+            continue;
+        }
+        let n = rec.len();
+        let mut off = 4usize;
+        if off + 2 > n {
+            break;
+        }
+        if off < n && rec[off] == 3 {
+            // ECDHE named curve: no finite-field DH group.
+            bits = 0;
+            group_len = 0;
+            break;
+        }
+        let plen = ((rec[off] as usize) << 8) | rec[off + 1] as usize;
+        off += 2;
+        if plen > 1024 || plen > n - off || plen < 64 {
+            bits = 0;
+            group_len = 0;
+            break;
+        }
+        if plen >= 2 {
+            let pbits = ((rec[off] as u32) << 8) | rec[off + 1] as u32;
+            if (512..=8192).contains(&pbits) {
+                bits = pbits as i32;
+                group_len = pbits / 8;
+            }
+        }
+        break;
+    }
+    drop(s);
+    (0, bits, group_len)
+}
+
+/* ---------------------------------------------------------------- */
+/* SNMPv2c / BER (arsenal_snmp.h)                                    */
+/* ---------------------------------------------------------------- */
+
+fn ber_len(out: &mut Vec<u8>, len: usize) {
+    if len < 128 {
+        out.push(len as u8);
+    } else if len < 256 {
+        out.push(0x81);
+        out.push(len as u8);
+    } else {
+        out.push(0x82);
+        out.push((len >> 8) as u8);
+        out.push((len & 0xff) as u8);
+    }
+}
+
+fn ber_tlv(tag: u8, val: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(tag);
+    ber_len(&mut out, val.len());
+    out.extend_from_slice(val);
+    out
+}
+
+fn ber_int(v: u32) -> Vec<u8> {
+    let mut tmp: Vec<u8> = Vec::new();
+    let mut v = v;
+    if v == 0 {
+        tmp.push(0);
+    } else {
+        while v > 0 && tmp.len() < 5 {
+            tmp.push((v & 0xff) as u8);
+            v >>= 8;
+        }
+    }
+    if tmp.len() > 1 && (tmp[tmp.len() - 1] & 0x80) != 0 {
+        tmp.push(0);
+    }
+    let rev: Vec<u8> = tmp.iter().rev().cloned().collect();
+    ber_tlv(0x02, &rev)
+}
+
+fn ber_oid(oid: &str) -> Option<Vec<u8>> {
+    let mut parts: Vec<u32> = Vec::new();
+    for seg in oid.split('.') {
+        if parts.len() >= 32 {
+            break;
+        }
+        if seg.is_empty() {
+            return None;
+        }
+        let v: u32 = seg.parse().ok()?;
+        parts.push(v);
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+    let mut tmp: Vec<u8> = Vec::new();
+    tmp.push((parts[0] * 40 + parts[1]) as u8);
+    for i in 2..parts.len() {
+        let mut v = parts[i];
+        let mut stack: Vec<u8> = Vec::new();
+        loop {
+            stack.push((v & 0x7F) as u8);
+            v >>= 7;
+            if v == 0 {
+                break;
+            }
+        }
+        while let Some(mut b) = stack.pop() {
+            if !stack.is_empty() {
+                b |= 0x80;
+            }
+            tmp.push(b);
+        }
+    }
+    Some(ber_tlv(0x06, &tmp))
+}
+
+fn snmp_make_get(community: &str, oid: &str) -> Option<Vec<u8>> {
+    let oidbuf = ber_oid(oid)?;
+    let nullbuf = ber_tlv(0x05, &[]);
+    let mut vbcontent = Vec::new();
+    vbcontent.extend_from_slice(&oidbuf);
+    vbcontent.extend_from_slice(&nullbuf);
+    let varbind = ber_tlv(0x30, &vbcontent);
+    let vblist = ber_tlv(0x30, &varbind);
+    let mut pducontent = Vec::new();
+    pducontent.extend_from_slice(&ber_int(1)); // request-id
+    pducontent.extend_from_slice(&ber_int(0)); // error-status
+    pducontent.extend_from_slice(&ber_int(0)); // error-index
+    pducontent.extend_from_slice(&vblist);
+    let pdu = ber_tlv(0xA0, &pducontent); // GetRequest
+    let mut msgcontent = Vec::new();
+    msgcontent.extend_from_slice(&ber_int(1)); // version = SNMPv2c
+    msgcontent.extend_from_slice(&ber_tlv(0x04, community.as_bytes()));
+    msgcontent.extend_from_slice(&pdu);
+    Some(ber_tlv(0x30, &msgcontent))
+}
+
+/* (tag, value-offset, value-len, consumed) from a BER TLV, or None. */
+fn ber_read_tlv(p: &[u8]) -> Option<(u8, usize, usize, usize)> {
+    let len = p.len();
+    if len < 2 {
+        return None;
+    }
+    let tag = p[0];
+    let (l, o);
+    if p[1] & 0x80 == 0 {
+        l = p[1] as usize;
+        o = 2usize;
+    } else {
+        let n = (p[1] & 0x7F) as usize;
+        if n < 1 || n > 3 || len < 2 + n {
+            return None;
+        }
+        let mut ll = 0usize;
+        for i in 0..n {
+            ll = (ll << 8) | p[2 + i] as usize;
+        }
+        l = ll;
+        o = 2 + n;
+    }
+    if o + l > len {
+        return None;
+    }
+    Some((tag, o, l, o + l))
+}
+
+fn snmp_format_value(tag: u8, v: &[u8]) -> String {
+    let vl = v.len();
+    let out = if tag == 0x04 {
+        String::from_utf8_lossy(v).into_owned()
+    } else if tag == 0x06 {
+        let mut s = String::new();
+        let mut x: u32 = 0;
+        let mut first = true;
+        for &b in v.iter() {
+            x = (x << 7) | (b & 0x7F) as u32;
+            if b & 0x80 == 0 {
+                if first {
+                    s.push_str(&format!("{}.{}", x / 40, x % 40));
+                    first = false;
+                } else {
+                    s.push_str(&format!(".{}", x));
+                }
+                x = 0;
+            }
+        }
+        s
+    } else if tag == 0x02 || tag == 0x41 || tag == 0x42 || tag == 0x43 {
+        let mut x: u32 = 0;
+        for &b in v.iter() {
+            x = (x << 8) | b as u32;
+        }
+        format!("{}", x)
+    } else {
+        format!("tag 0x{:02x} len {}", tag, vl)
+    };
+    clean(&out)
+}
+
+/* SNMPv2c GET; returns the first varbind value as text, or None. */
+pub fn snmp_get(ctx: *mut AlScriptContext, community: &str, oid: &str) -> Option<String> {
+    let req = snmp_make_get(community, oid)?;
+    let resp = udp_exchange(ctx, &req, 2048)?;
+    if resp.is_empty() {
+        return None;
+    }
+    let (tag, o, vl, _c) = ber_read_tlv(&resp)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let v = &resp[o..o + vl];
+    let mut off = 0usize;
+    for i in 0..3 {
+        if off >= vl {
+            break;
+        }
+        let (t, oo, l, c) = ber_read_tlv(&v[off..])?;
+        let seg = &v[off + oo..off + oo + l];
+        off += c;
+        if i == 2 && t == 0xA2 {
+            let mut po = 0usize;
+            for j in 0..4 {
+                if po >= l {
+                    break;
+                }
+                let (pt, poo, pl, pc) = ber_read_tlv(&seg[po..])?;
+                let pseg = &seg[po + poo..po + poo + pl];
+                po += pc;
+                if j == 3 && pt == 0x30 {
+                    let (_vt, voo, vll, _vc) = ber_read_tlv(pseg)?;
+                    let vseg = &pseg[voo..voo + vll];
+                    let (_t1, _o1, _l1, c1) = ber_read_tlv(vseg)?;
+                    let (vt2, o2, l2, _c2) = ber_read_tlv(&vseg[c1..])?;
+                    let valslice = &vseg[c1 + o2..c1 + o2 + l2];
+                    return Some(snmp_format_value(vt2, valslice));
+                }
+            }
+        }
+    }
+    None
+}
+
+/* ---------------------------------------------------------------- */
 /* MySQL (arsenal_mysql.h)                                          */
 /* ---------------------------------------------------------------- */
 
