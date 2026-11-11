@@ -1332,3 +1332,286 @@ pub fn basic_auth(user: &str, pass: &str) -> String {
     let raw = format!("{}:{}", user, pass);
     format!("Authorization: Basic {}\r\n", b64(raw.as_bytes()))
 }
+
+/* ---------------------------------------------------------------- */
+/* DES (arsenal_des.h) - compact single-DES ECB for VNC auth         */
+/* ---------------------------------------------------------------- */
+
+const DES_IP: [u8; 64] = [
+    58, 50, 42, 34, 26, 18, 10, 2, 60, 52, 44, 36, 28, 20, 12, 4,
+    62, 54, 46, 38, 30, 22, 14, 6, 64, 56, 48, 40, 32, 24, 16, 8,
+    57, 49, 41, 33, 25, 17, 9, 1, 59, 51, 43, 35, 27, 19, 11, 3,
+    61, 53, 45, 37, 29, 21, 13, 5, 63, 55, 47, 39, 31, 23, 15, 7,
+];
+
+const DES_FP: [u8; 64] = [
+    40, 8, 48, 16, 56, 24, 64, 32, 39, 7, 47, 15, 55, 23, 63, 31,
+    38, 6, 46, 14, 54, 22, 62, 30, 37, 5, 45, 13, 53, 21, 61, 29,
+    36, 4, 44, 12, 52, 20, 60, 28, 35, 3, 43, 11, 51, 19, 59, 27,
+    34, 2, 42, 10, 50, 18, 58, 26, 33, 1, 41, 9, 49, 17, 57, 25,
+];
+
+const DES_E: [u8; 48] = [
+    32, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 9, 8, 9, 10, 11, 12, 13,
+    12, 13, 14, 15, 16, 17, 16, 17, 18, 19, 20, 21, 20, 21, 22, 23, 24, 25,
+    24, 25, 26, 27, 28, 29, 28, 29, 30, 31, 32, 1,
+];
+
+const DES_P: [u8; 32] = [
+    16, 7, 20, 21, 29, 12, 28, 17, 1, 15, 23, 26, 5, 18, 31, 10,
+    2, 8, 24, 14, 32, 27, 3, 9, 19, 13, 30, 6, 22, 11, 4, 25,
+];
+
+const DES_PC1: [u8; 56] = [
+    57, 49, 41, 33, 25, 17, 9, 1, 58, 50, 42, 34, 26, 18,
+    10, 2, 59, 51, 43, 35, 27, 19, 11, 3, 60, 52, 44, 36,
+    63, 55, 47, 39, 31, 23, 15, 7, 62, 54, 46, 38, 30, 22,
+    14, 6, 61, 53, 45, 37, 29, 21, 13, 5, 28, 20, 12, 4,
+];
+
+const DES_PC2: [u8; 48] = [
+    14, 17, 11, 24, 1, 5, 3, 28, 15, 6, 21, 10,
+    23, 19, 12, 4, 26, 8, 16, 7, 27, 20, 13, 2,
+    41, 52, 31, 37, 47, 55, 30, 40, 51, 45, 33, 48,
+    44, 49, 39, 56, 34, 53, 46, 42, 50, 36, 29, 32,
+];
+
+const DES_SHIFTS: [u8; 16] = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1];
+
+const DES_S: [[[u8; 16]; 4]; 8] = [
+    [
+        [14, 4, 13, 1, 2, 15, 11, 8, 3, 10, 6, 12, 5, 9, 0, 7],
+        [0, 15, 7, 4, 14, 2, 13, 1, 10, 6, 12, 11, 9, 5, 3, 8],
+        [4, 1, 14, 8, 13, 6, 2, 11, 15, 12, 9, 7, 3, 10, 5, 0],
+        [15, 12, 8, 2, 4, 9, 1, 7, 5, 11, 3, 14, 10, 0, 6, 13],
+    ],
+    [
+        [15, 1, 8, 14, 6, 11, 3, 4, 9, 7, 2, 13, 12, 0, 5, 10],
+        [3, 13, 4, 7, 15, 2, 8, 14, 12, 0, 1, 10, 6, 9, 11, 5],
+        [0, 14, 7, 11, 10, 4, 13, 1, 5, 8, 12, 6, 9, 3, 2, 15],
+        [13, 8, 10, 1, 3, 15, 4, 2, 11, 6, 7, 12, 0, 5, 14, 9],
+    ],
+    [
+        [10, 0, 9, 14, 6, 3, 15, 5, 1, 13, 12, 7, 11, 4, 2, 8],
+        [13, 7, 0, 9, 3, 4, 6, 10, 2, 8, 5, 14, 12, 11, 15, 1],
+        [13, 6, 4, 9, 8, 15, 3, 0, 11, 1, 2, 12, 5, 10, 14, 7],
+        [1, 10, 13, 0, 6, 9, 8, 7, 4, 15, 14, 3, 11, 5, 2, 12],
+    ],
+    [
+        [7, 13, 14, 3, 0, 6, 9, 10, 1, 2, 8, 5, 11, 12, 4, 15],
+        [13, 8, 11, 5, 6, 15, 0, 3, 4, 7, 2, 12, 1, 10, 14, 9],
+        [10, 6, 9, 0, 12, 11, 7, 13, 15, 1, 3, 14, 5, 2, 8, 4],
+        [3, 15, 0, 6, 10, 1, 13, 8, 9, 4, 5, 11, 12, 7, 2, 14],
+    ],
+    [
+        [2, 12, 4, 1, 7, 10, 11, 6, 8, 5, 3, 15, 13, 0, 14, 9],
+        [14, 11, 2, 12, 4, 7, 13, 1, 5, 0, 15, 10, 3, 9, 8, 6],
+        [4, 2, 1, 11, 10, 13, 7, 8, 15, 9, 12, 5, 6, 3, 0, 14],
+        [11, 8, 12, 7, 1, 14, 2, 13, 6, 15, 0, 9, 10, 4, 5, 3],
+    ],
+    [
+        [12, 1, 10, 15, 9, 2, 6, 8, 0, 13, 3, 4, 14, 7, 5, 11],
+        [10, 15, 4, 2, 7, 12, 9, 5, 6, 1, 13, 14, 0, 11, 3, 8],
+        [9, 14, 15, 5, 2, 8, 12, 3, 7, 0, 4, 10, 1, 13, 11, 6],
+        [4, 3, 2, 12, 9, 5, 15, 10, 11, 14, 1, 7, 6, 0, 8, 13],
+    ],
+    [
+        [4, 11, 2, 14, 15, 0, 8, 13, 3, 12, 9, 7, 5, 10, 6, 1],
+        [13, 0, 11, 7, 4, 9, 1, 10, 14, 3, 5, 12, 2, 15, 8, 6],
+        [1, 4, 11, 13, 12, 3, 7, 14, 10, 15, 6, 8, 0, 5, 9, 2],
+        [6, 11, 13, 8, 1, 4, 10, 7, 9, 5, 0, 15, 14, 2, 3, 12],
+    ],
+    [
+        [13, 2, 8, 4, 6, 15, 11, 1, 10, 9, 3, 14, 5, 0, 12, 7],
+        [1, 15, 13, 8, 10, 3, 7, 4, 12, 5, 6, 11, 0, 14, 9, 2],
+        [7, 11, 4, 1, 9, 12, 14, 2, 0, 6, 10, 13, 15, 3, 5, 8],
+        [2, 1, 14, 7, 4, 10, 8, 13, 15, 12, 9, 0, 3, 5, 6, 11],
+    ],
+];
+
+fn des_perm(input: u64, tab: &[u8], inbits: u32) -> u64 {
+    let mut out: u64 = 0;
+    for &t in tab.iter() {
+        out <<= 1;
+        out |= (input >> (inbits - t as u32)) & 1;
+    }
+    out
+}
+
+fn des_rotl28(v: u32, n: u32) -> u32 {
+    ((v << n) | (v >> (28 - n))) & 0x0FFF_FFFF
+}
+
+fn des_key_schedule(key: &[u8; 8]) -> [u64; 16] {
+    let mut k: u64 = 0;
+    for i in 0..8 {
+        k = (k << 8) | key[i] as u64;
+    }
+    let pc1 = des_perm(k, &DES_PC1, 64);
+    let mut c = ((pc1 >> 28) & 0x0FFF_FFFF) as u32;
+    let mut d = (pc1 & 0x0FFF_FFFF) as u32;
+    let mut sub = [0u64; 16];
+    for i in 0..16 {
+        c = des_rotl28(c, DES_SHIFTS[i] as u32);
+        d = des_rotl28(d, DES_SHIFTS[i] as u32);
+        sub[i] = des_perm(((c as u64) << 28) | d as u64, &DES_PC2, 56);
+    }
+    sub
+}
+
+pub fn des_encrypt_block(key: &[u8; 8], input: &[u8; 8]) -> [u8; 8] {
+    let mut block: u64 = 0;
+    for i in 0..8 {
+        block = (block << 8) | input[i] as u64;
+    }
+    let sub = des_key_schedule(key);
+    let ip = des_perm(block, &DES_IP, 64);
+    let mut l = (ip >> 32) as u32;
+    let mut r = (ip & 0xFFFF_FFFF) as u32;
+    for i in 0..16 {
+        let er = des_perm(r as u64, &DES_E, 32) ^ sub[i];
+        let mut s: u32 = 0;
+        for j in 0..8u32 {
+            let six = ((er >> (42 - j * 6)) & 0x3F) as u32;
+            let row = (((six & 0x20) >> 4) | (six & 1)) as usize;
+            let col = ((six >> 1) & 0x0F) as usize;
+            s = (s << 4) | DES_S[j as usize][row][col] as u32;
+        }
+        let f = des_perm(s as u64, &DES_P, 32) as u32;
+        let nr = l ^ f;
+        l = r;
+        r = nr;
+    }
+    block = ((r as u64) << 32) | l as u64;
+    block = des_perm(block, &DES_FP, 64);
+    let mut out = [0u8; 8];
+    let mut i = 8;
+    while i > 0 {
+        i -= 1;
+        out[i] = (block & 0xFF) as u8;
+        block >>= 8;
+    }
+    out
+}
+
+pub fn des_reverse8(b: u8) -> u8 {
+    let mut r = 0u8;
+    let mut b = b;
+    for _ in 0..8 {
+        r = (r << 1) | (b & 1);
+        b >>= 1;
+    }
+    r
+}
+
+/* ---------------------------------------------------------------- */
+/* VNC / RFB authentication (arsenal_vnc.h)                          */
+/* ---------------------------------------------------------------- */
+
+/* Try one VNC password. Mirrors ar_vnc_try_password():
+ *   1  = password accepted
+ *   2  = no authentication required (security type None)
+ *   0  = rejected
+ *  -1  = connection / protocol error */
+pub fn vnc_try_password(ctx: *mut AlScriptContext, pass: &str) -> i32 {
+    let mut stream = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let ver = match recv_exact(&mut stream, 12) {
+        Some(v) => v,
+        None => return -1,
+    };
+    if &ver[0..4] != b"RFB " {
+        return -1;
+    }
+    if send_all(&mut stream, b"RFB 003.008\n").is_err() {
+        return -1;
+    }
+    let sectype: i32;
+    if ver[4] == b'0' && ver[5] == b'0' && ver[6] == b'3' && ver[8] == b'0'
+        && ver[9] == b'0' && ver[10] < b'8'
+    {
+        let buf = match recv_exact(&mut stream, 4) {
+            Some(v) => v,
+            None => return -1,
+        };
+        sectype = ((buf[0] as i32) << 24)
+            | ((buf[1] as i32) << 16)
+            | ((buf[2] as i32) << 8)
+            | buf[3] as i32;
+    } else {
+        let one = match recv_exact(&mut stream, 1) {
+            Some(v) => v,
+            None => return -1,
+        };
+        let mut n = one[0] as usize;
+        if n == 0 {
+            return -1;
+        }
+        if n > 256 {
+            n = 256;
+        }
+        let buf = match recv_exact(&mut stream, n) {
+            Some(v) => v,
+            None => return -1,
+        };
+        let mut st = 0i32;
+        for i in 0..n {
+            if buf[i] == 2 {
+                st = 2;
+                break;
+            }
+            if buf[i] == 1 && st == 0 {
+                st = 1;
+            }
+        }
+        if st == 0 {
+            return -1;
+        }
+        sectype = st;
+        if send_all(&mut stream, &[st as u8]).is_err() {
+            return -1;
+        }
+    }
+    if sectype == 1 {
+        return 2;
+    }
+    if sectype != 2 {
+        return 0;
+    }
+    let challenge = match recv_exact(&mut stream, 16) {
+        Some(v) => v,
+        None => return -1,
+    };
+    let mut key = [0u8; 8];
+    let pb = pass.as_bytes();
+    for i in 0..8 {
+        if i < pb.len() {
+            key[i] = des_reverse8(pb[i]);
+        }
+    }
+    let mut c0 = [0u8; 8];
+    let mut c1 = [0u8; 8];
+    c0.copy_from_slice(&challenge[0..8]);
+    c1.copy_from_slice(&challenge[8..16]);
+    let mut resp = [0u8; 16];
+    resp[0..8].copy_from_slice(&des_encrypt_block(&key, &c0));
+    resp[8..16].copy_from_slice(&des_encrypt_block(&key, &c1));
+    if send_all(&mut stream, &resp).is_err() {
+        return -1;
+    }
+    let res = match recv_exact(&mut stream, 4) {
+        Some(v) => v,
+        None => return -1,
+    };
+    let result = ((res[0] as i32) << 24)
+        | ((res[1] as i32) << 16)
+        | ((res[2] as i32) << 8)
+        | res[3] as i32;
+    if result == 0 {
+        1
+    } else {
+        0
+    }
+}
