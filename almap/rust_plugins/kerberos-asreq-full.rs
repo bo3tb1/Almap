@@ -1,293 +1,228 @@
-/*
- * kerberos-asreq-full (Rust) - full Kerberos AS-REQ probe (RFC 4120).
- *
- * Faithful port of kerberos-asreq-full.c. Builds a complete DER-encoded
- * AS-REQ with no pre-authentication (AS-REP roasting), frames it with the
- * TCP 4-byte length prefix, and decodes the reply:
- *   AS-REP (0x6B)    -> no pre-auth required (roastable)
- *   KRB-ERROR (0x7E) -> the error code is decoded
- *
- * Read-only: no credentials, no ticket material. Pure std; the fixed-cap
- * buffers of the C become growable Vecs (the wire output is identical).
- * Use only on networks you own or have permission to scan.
- */
-#![allow(dead_code, non_snake_case, non_upper_case_globals)]
-
-include!("alscript.rs");
-
-const KRB_DEF_CNAME: &str = "administrator";
-const KRB_DEF_REALM: &str = "EXAMPLE.COM";
-
-const DER_INT: u8 = 0x02;
-const DER_BITSTR: u8 = 0x03;
-const DER_GENSTR: u8 = 0x1B;
-const DER_GENTIME: u8 = 0x18;
-const DER_SEQ: u8 = 0x30;
-
-/// DER length encoding (port of der_len).
-fn der_len(len: usize) -> Vec<u8> {
-    if len < 0x80 {
-        vec![len as u8]
-    } else if len < 0x100 {
-        vec![0x81, len as u8]
-    } else {
-        vec![0x82, (len >> 8) as u8, (len & 0xFF) as u8]
-    }
-}
-
-/// Wrap `content` in a DER TLV (port of der_wrap).
-fn der_wrap(tag: u8, content: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 3 + content.len());
-    out.push(tag);
-    out.extend_from_slice(&der_len(content.len()));
-    out.extend_from_slice(content);
-    out
-}
-
-/// DER INTEGER for a small non-negative value (port of der_int).
-fn der_int(v: u32) -> Vec<u8> {
-    let bytes = [(v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, (v & 0xFF) as u8];
-    let mut start = 0usize;
-    while start < 3 && bytes[start] == 0 {
-        start += 1;
-    }
-    let mut tmp: Vec<u8> = Vec::new();
-    if bytes[start] & 0x80 != 0 {
-        tmp.push(0x00);
-    }
-    tmp.extend_from_slice(&bytes[start..]);
-    der_wrap(DER_INT, &tmp)
-}
-
-/// DER GeneralString (port of der_genstr).
-fn der_genstr(s: &str) -> Vec<u8> {
-    der_wrap(DER_GENSTR, s.as_bytes())
-}
-
-/// PrincipalName SEQUENCE (port of der_princ).
-fn der_princ(name_type: i32, parts: &[&str]) -> Vec<u8> {
-    let mut strseq: Vec<u8> = Vec::new();
-    for p in parts {
-        strseq.extend_from_slice(&der_genstr(p));
-    }
-    let mut body: Vec<u8> = Vec::new();
-    // [0] name-type INTEGER
-    let nt = der_int(name_type as u32);
-    body.extend_from_slice(&der_wrap(0xA0, &nt));
-    // [1] name-string SEQUENCE OF GeneralString
-    let seqwrap = der_wrap(DER_SEQ, &strseq);
-    body.extend_from_slice(&der_wrap(0xA1, &seqwrap));
-    der_wrap(DER_SEQ, &body)
-}
-
-/// Build a full AS-REQ for (cname, realm) (port of build_as_req).
-fn build_as_req(cname: &str, realm: &str, nonce: u32) -> Vec<u8> {
-    let mut body: Vec<u8> = Vec::new();
-
-    // [0] kdc-options BIT STRING (forwardable|renewable|renewable-ok).
-    let opts: [u8; 5] = [0x00, 0x40, 0x81, 0x00, 0x10];
-    let bs = der_wrap(DER_BITSTR, &opts);
-    body.extend_from_slice(&der_wrap(0xA0, &bs));
-
-    // [1] cname PrincipalName (NT-PRINCIPAL = 1).
-    let pr = der_princ(1, &[cname]);
-    body.extend_from_slice(&der_wrap(0xA1, &pr));
-
-    // [2] realm GeneralString.
-    let r = der_genstr(realm);
-    body.extend_from_slice(&der_wrap(0xA2, &r));
-
-    // [3] sname PrincipalName (NT-SRV-INST = 2): krbtgt/REALM.
-    let pr = der_princ(2, &["krbtgt", realm]);
-    body.extend_from_slice(&der_wrap(0xA3, &pr));
-
-    // [5] till KerberosTime (far future).
-    let till = b"20370913024805Z";
-    let t = der_wrap(DER_GENTIME, till);
-    body.extend_from_slice(&der_wrap(0xA5, &t));
-
-    // [7] nonce INTEGER.
-    let nb = der_int(nonce & 0x7FFF_FFFF);
-    body.extend_from_slice(&der_wrap(0xA7, &nb));
-
-    // [8] etype SEQUENCE OF INTEGER { AES256, AES128, RC4-HMAC }.
-    let mut el: Vec<u8> = Vec::new();
-    for &e in &[18u32, 17, 23] {
-        el.extend_from_slice(&der_int(e));
-    }
-    let seq = der_wrap(DER_SEQ, &el);
-    body.extend_from_slice(&der_wrap(0xA8, &seq));
-
-    // req-body SEQUENCE, then the KDC-REQ wrapper.
-    let reqbody = der_wrap(DER_SEQ, &body);
-    let mut kdcreq: Vec<u8> = Vec::new();
-    // [1] pvno INTEGER 5
-    kdcreq.extend_from_slice(&der_wrap(0xA1, &der_int(5)));
-    // [2] msg-type INTEGER 10 (AS-REQ)
-    kdcreq.extend_from_slice(&der_wrap(0xA2, &der_int(10)));
-    // [4] req-body
-    kdcreq.extend_from_slice(&der_wrap(0xA4, &reqbody));
-    // KDC-REQ SEQUENCE, then [APPLICATION 10] AS-REQ.
-    let sq = der_wrap(DER_SEQ, &kdcreq);
-    der_wrap(0x6A, &sq)
-}
-
-fn krb_err_name(code: i32) -> &'static str {
-    match code {
-        6 => "KDC_ERR_C_PRINCIPAL_UNKNOWN (user not found)",
-        7 => "KDC_ERR_S_PRINCIPAL_UNKNOWN",
-        12 => "KDC_ERR_POLICY",
-        18 => "KDC_ERR_CLIENT_REVOKED (account disabled/locked)",
-        23 => "KDC_ERR_KEY_EXPIRED (password expired)",
-        24 => "KDC_ERR_PREAUTH_FAILED",
-        25 => "KDC_ERR_PREAUTH_REQUIRED (account found)",
-        68 => "KDC_ERR_WRONG_REALM",
-        _ => "KRB error",
-    }
-}
-
-/// Parse the AS-REQ reply (port of parse_reply). Returns None when the
-/// reply is unrecognized, Some((is_rep, errcode)) otherwise.
-fn parse_reply(p: &[u8]) -> Option<(bool, i32)> {
-    if p.len() < 2 {
-        return None;
-    }
-    if p[0] == 0x6B {
-        return Some((true, -1));
-    }
-    if p[0] != 0x7E {
-        return None;
-    }
-    let mut errcode = -1i32;
-    let mut i = 0usize;
-    while i + 4 < p.len() {
-        if p[i] == 0xA6 && p[i + 2] == DER_INT {
-            let ilen = p[i + 3] as usize;
-            if ilen >= 1 && ilen <= 4 && i + 4 + ilen <= p.len() {
-                let mut v = 0i32;
-                for j in 0..ilen {
-                    v = (v << 8) | p[i + 4 + j] as i32;
-                }
-                errcode = v;
-                return Some((false, errcode));
-            }
-        }
-        i += 1;
-    }
-    Some((false, errcode))
-}
-
-fn make_nonce(ctx: &AlScriptContext) -> u32 {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u32)
-        .unwrap_or(0x1234_5678);
-    t ^ (ctx.port as u32).wrapping_mul(2654435761)
-}
-
-fn run(ctx: &AlScriptContext) -> i32 {
-    if !ar_valid(ctx) {
-        return 1;
-    }
-    let nonce = make_nonce(ctx);
-    let req = build_as_req(KRB_DEF_CNAME, KRB_DEF_REALM, nonce);
-    if req.is_empty() {
-        ar_out(ctx, "kerberos-asreq-full: failed to encode AS-REQ");
-        return 0;
-    }
-    let reqlen = req.len();
-    // TCP Kerberos: 4-byte big-endian length prefix.
-    let mut framed = Vec::with_capacity(reqlen + 4);
-    framed.push((reqlen >> 24) as u8);
-    framed.push((reqlen >> 16) as u8);
-    framed.push((reqlen >> 8) as u8);
-    framed.push((reqlen & 0xFF) as u8);
-    framed.extend_from_slice(&req);
-
-    let mut s = match as_connect(ctx) {
-        Some(s) => s,
-        None => {
-            ar_out(
-                ctx,
-                &format!("kerberos-asreq-full: KDC not reachable on TCP {}", ctx.port),
-            );
-            return 0;
-        }
-    };
-    if !as_send_all(&mut s, &framed) {
-        ar_out(ctx, "kerberos-asreq-full: send failed");
-        return 0;
-    }
-    // Read the 4-byte reply length, then the body.
-    let mut lh = [0u8; 4];
-    if !as_recv_exact(&mut s, &mut lh) {
-        ar_out(
-            ctx,
-            &format!(
-                "kerberos-asreq-full: no AS-REP/KRB-ERROR (realm={} likely not this KDC's)",
-                KRB_DEF_REALM
-            ),
-        );
-        return 0;
-    }
-    let blen = ((lh[0] as usize) << 24)
-        | ((lh[1] as usize) << 16)
-        | ((lh[2] as usize) << 8)
-        | lh[3] as usize;
-    if blen == 0 || blen > 4096 {
-        ar_out(
-            ctx,
-            &format!("kerberos-asreq-full: oversized reply ({} bytes)", blen),
-        );
-        return 0;
-    }
-    let mut resp = vec![0u8; blen];
-    if !as_recv_exact(&mut s, &mut resp) {
-        ar_out(ctx, "kerberos-asreq-full: truncated reply");
-        return 0;
-    }
-
-    match parse_reply(&resp) {
-        None => {
-            ar_out(
-                ctx,
-                &format!(
-                    "kerberos-asreq-full: KDC reachable, unrecognized reply ({} bytes)",
-                    blen
-                ),
-            );
-        }
-        Some((true, _)) => {
-            ar_out(
-                ctx,
-                &format!(
-                    "kerberos-asreq-full: AS-REP received for {}@{} - NO pre-auth \
-                     required (AS-REP roastable)",
-                    KRB_DEF_CNAME, KRB_DEF_REALM
-                ),
-            );
-        }
-        Some((false, errcode)) => {
-            ar_out(
-                ctx,
-                &format!(
-                    "kerberos-asreq-full: KRB-ERROR {} - {} (probe {}@{})",
-                    errcode,
-                    krb_err_name(errcode),
-                    KRB_DEF_CNAME,
-                    KRB_DEF_REALM
-                ),
-            );
-        }
-    }
-    0
-}
+/* kerberos-asreq-full - Kerberos AS-REQ probe */
+#![allow(dead_code)]
+mod arsenal;
+use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    if ctx.is_null() {
-        return 1;
+const CNAME: &str = "administrator";
+    const REALM: &str = "EXAMPLE.COM";
+
+    fn der_len(len: usize, out: &mut [u8]) -> usize {
+        if len < 0x80 { out[0] = len as u8; return 1; }
+        if len < 0x100 { out[0] = 0x81; out[1] = len as u8; return 2; }
+        out[0] = 0x82; out[1] = (len >> 8) as u8; out[2] = (len & 0xff) as u8; 3
     }
-    let ctx: &AlScriptContext = unsafe { &*ctx };
-    run(ctx)
+    fn der_wrap(tag: u8, content: &[u8], dst: &mut [u8]) -> usize {
+        let mut lb = [0u8; 3];
+        let ln = der_len(content.len(), &mut lb);
+        if 1 + ln + content.len() > dst.len() { return 0; }
+        dst[0] = tag;
+        dst[1..1 + ln].copy_from_slice(&lb[..ln]);
+        dst[1 + ln..1 + ln + content.len()].copy_from_slice(content);
+        1 + ln + content.len()
+    }
+    fn der_int(v: u32, dst: &mut [u8]) -> usize {
+        let bytes = [(v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8];
+        let mut start = 0usize;
+        while start < 3 && bytes[start] == 0 { start += 1; }
+        let mut tmp = Vec::new();
+        if bytes[start] & 0x80 != 0 { tmp.push(0u8); }
+        tmp.extend_from_slice(&bytes[start..]);
+        der_wrap(0x02, &tmp, dst)
+    }
+    fn der_genstr(s: &str, dst: &mut [u8]) -> usize {
+        der_wrap(0x1B, s.as_bytes(), dst)
+    }
+    fn der_princ(name_type: i32, parts: &[&str], dst: &mut [u8]) -> usize {
+        let mut strseq = [0u8; 256];
+        let mut so = 0usize;
+        for p in parts {
+            let w = der_genstr(p, &mut strseq[so..]);
+            if w == 0 { return 0; }
+            so += w;
+        }
+        let mut nt = [0u8; 16];
+        let nt_n = der_int(name_type as u32, &mut nt);
+        let mut field = [0u8; 16];
+        let f_n = der_wrap(0xA0, &nt[..nt_n], &mut field);
+        if f_n == 0 { return 0; }
+        let mut body = [0u8; 320];
+        let mut bo = 0usize;
+        body[..f_n].copy_from_slice(&field[..f_n]);
+        bo += f_n;
+        let mut seqwrap = [0u8; 300];
+        let sw = der_wrap(0x30, &strseq[..so], &mut seqwrap);
+        if sw == 0 { return 0; }
+        let mut ctx1 = [0u8; 320];
+        let cw = der_wrap(0xA1, &seqwrap[..sw], &mut ctx1);
+        if cw == 0 || bo + cw > body.len() { return 0; }
+        body[bo..bo + cw].copy_from_slice(&ctx1[..cw]);
+        bo += cw;
+        der_wrap(0x30, &body[..bo], dst)
+    }
+    fn build_as_req(cname: &str, realm: &str, nonce: u32, out: &mut [u8]) -> usize {
+        let mut body = [0u8; 1024];
+        let mut bo = 0usize;
+        let mut tmp = [0u8; 512];
+        // [0] kdc-options
+        let opts: [u8; 5] = [0x00, 0x40, 0x81, 0x00, 0x10];
+        let mut bs = [0u8; 8];
+        let bn = der_wrap(0x03, &opts, &mut bs);
+        let w = der_wrap(0xA0, &bs[..bn], &mut body[bo..]);
+        if w == 0 { return 0; }
+        bo += w;
+        // [1] cname
+        let mut pr = [0u8; 256];
+        let pn = der_princ(1, &[cname], &mut pr);
+        if pn == 0 { return 0; }
+        let w = der_wrap(0xA1, &pr[..pn], &mut body[bo..]);
+        if w == 0 { return 0; }
+        bo += w;
+        // [2] realm
+        let mut r = [0u8; 128];
+        let rn = der_genstr(realm, &mut r);
+        if rn == 0 { return 0; }
+        let w = der_wrap(0xA2, &r[..rn], &mut body[bo..]);
+        if w == 0 { return 0; }
+        bo += w;
+        // [3] sname
+        let mut pr = [0u8; 256];
+        let pn = der_princ(2, &["krbtgt", realm], &mut pr);
+        if pn == 0 { return 0; }
+        let w = der_wrap(0xA3, &pr[..pn], &mut body[bo..]);
+        if w == 0 { return 0; }
+        bo += w;
+        // [5] till
+        let mut t = [0u8; 32];
+        let tn = der_wrap(0x18, b"20370913024805Z", &mut t);
+        let w = der_wrap(0xA5, &t[..tn], &mut body[bo..]);
+        if w == 0 { return 0; }
+        bo += w;
+        // [7] nonce
+        let mut nb = [0u8; 8];
+        let nn = der_int(nonce & 0x7FFFFFFF, &mut nb);
+        let w = der_wrap(0xA7, &nb[..nn], &mut body[bo..]);
+        if w == 0 { return 0; }
+        bo += w;
+        // [8] etypes
+        let mut el = [0u8; 32];
+        let mut eo = 0usize;
+        for e in [18u32, 17, 23] {
+            let en = der_int(e, &mut el[eo..]);
+            if en == 0 { return 0; }
+            eo += en;
+        }
+        let mut seq = [0u8; 48];
+        let sn = der_wrap(0x30, &el[..eo], &mut seq);
+        let mut ctx8 = [0u8; 48];
+        let cn = der_wrap(0xA8, &seq[..sn], &mut ctx8);
+        if cn == 0 || bo + cn > body.len() { return 0; }
+        body[bo..bo + cn].copy_from_slice(&ctx8[..cn]);
+        bo += cn;
+        // req-body + KDC-REQ
+        let mut reqbody = [0u8; 1100];
+        let rb = der_wrap(0x30, &body[..bo], &mut reqbody);
+        if rb == 0 { return 0; }
+        let mut kdcreq = [0u8; 1200];
+        let mut ko = 0usize;
+        let w = der_int(5, &mut tmp);
+        let w = der_wrap(0xA1, &tmp[..w], &mut kdcreq[ko..]);
+        if w == 0 { return 0; }
+        ko += w;
+        let w = der_int(10, &mut tmp);
+        let w = der_wrap(0xA2, &tmp[..w], &mut kdcreq[ko..]);
+        if w == 0 { return 0; }
+        ko += w;
+        let w = der_wrap(0xA4, &reqbody[..rb], &mut kdcreq[ko..]);
+        if w == 0 { return 0; }
+        ko += w;
+        let sq = der_wrap(0x30, &kdcreq[..ko], &mut tmp);
+        if sq == 0 { return 0; }
+        der_wrap(0x6A, &tmp[..sq], out)
+    }
+    fn err_name(code: i32) -> &'static str {
+        match code {
+            6 => "KDC_ERR_C_PRINCIPAL_UNKNOWN (user not found)",
+            7 => "KDC_ERR_S_PRINCIPAL_UNKNOWN",
+            12 => "KDC_ERR_POLICY",
+            18 => "KDC_ERR_CLIENT_REVOKED (account disabled/locked)",
+            23 => "KDC_ERR_KEY_EXPIRED (password expired)",
+            24 => "KDC_ERR_PREAUTH_FAILED",
+            25 => "KDC_ERR_PREAUTH_REQUIRED (account found)",
+            68 => "KDC_ERR_WRONG_REALM",
+            _ => "KRB error",
+        }
+    }
+
+    let nonce = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0))
+        ^ (unsafe { (*ctx).port } as u32).wrapping_mul(2654435761);
+    let mut req = [0u8; 1400];
+    let reqlen = build_as_req(CNAME, REALM, nonce, &mut req);
+    if reqlen == 0 {
+        set_out(ctx, "kerberos-asreq-full: failed to encode AS-REQ");
+        return 0;
+    }
+    let mut framed = vec![0u8; reqlen + 4];
+    framed[0] = (reqlen >> 24) as u8;
+    framed[1] = (reqlen >> 16) as u8;
+    framed[2] = (reqlen >> 8) as u8;
+    framed[3] = reqlen as u8;
+    framed[4..].copy_from_slice(&req[..reqlen]);
+
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => {
+            set_out(ctx, &format!("kerberos-asreq-full: KDC not reachable on TCP {}", unsafe { (*ctx).port }));
+            return 0;
+        }
+    };
+    if send_all(&mut s, &framed).is_err() {
+        set_out(ctx, "kerberos-asreq-full: send failed");
+        return 0;
+    }
+    let lh = match recv_exact(&mut s, 4) {
+        Some(v) => v,
+        None => {
+            set_out(ctx, &format!("kerberos-asreq-full: no AS-REP/KRB-ERROR (realm={} likely not {})", REALM, "this KDC's"));
+            return 0;
+        }
+    };
+    let blen = ((lh[0] as usize) << 24) | ((lh[1] as usize) << 16)
+        | ((lh[2] as usize) << 8) | lh[3] as usize;
+    if blen == 0 || blen > 4096 {
+        set_out(ctx, &format!("kerberos-asreq-full: oversized reply ({} bytes)", blen));
+        return 0;
+    }
+    let resp = match recv_exact(&mut s, blen) {
+        Some(v) => v,
+        None => { set_out(ctx, "kerberos-asreq-full: truncated reply"); return 0; }
+    };
+    let n = resp.len();
+    if resp[0] == 0x6B {
+        set_out(ctx, &format!("kerberos-asreq-full: AS-REP received for {}@{} - NO pre-auth required (AS-REP roastable)", CNAME, REALM));
+        return 0;
+    }
+    let mut errcode: i32 = -1;
+    if resp[0] == 0x7E {
+        let mut i = 0usize;
+        while i + 4 < n {
+            if resp[i] == 0xA6 && resp[i + 2] == 0x02 {
+                let ilen = resp[i + 3] as usize;
+                if ilen >= 1 && ilen <= 4 && i + 4 + ilen <= n {
+                    let mut v: i32 = 0;
+                    for j in 0..ilen { v = (v << 8) | resp[i + 4 + j] as i32; }
+                    errcode = v;
+                    break;
+                }
+            }
+            i += 1;
+        }
+    }
+    set_out(ctx, &format!("kerberos-asreq-full: KRB-ERROR {} - {} (probe {}@{})",
+                          errcode, err_name(errcode), CNAME, REALM));
+    0
 }

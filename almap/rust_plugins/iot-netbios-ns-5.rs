@@ -1,25 +1,17 @@
-/* iot-netbios-ns-5 - NetBIOS name-service NBSTAT probe */
+/* iot-netbios-ns-5 - NetBIOS name-service NBSTAT probe * Use only on networks you own or have permission to scan. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let req: [u8; 50] = [0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x43, 0x4b, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x00, 0x00, 0x21, 0x00, 0x01];
-    if !valid(ctx) {
-        return 1;
-    }
-    let resp = match udp_exchange(ctx, &req, 2048) {
-        Some(r) => r,
-        None => {
-            set_out(ctx, "iot-netbios-ns-5: no UDP reply");
-            return 0;
-        }
-    };
-    if resp.len() >= 2 && resp[0] == 0x12 {
-        set_out(ctx, &format!("iot-netbios-ns-5: expected reply seen ({} bytes)", resp.len()));
-    } else {
-        set_out(ctx, &format!("iot-netbios-ns-5: unexpected reply ({} bytes)", resp.len()));
-    }
-    0
+let text: String;
+let req = &[18, 52, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 32, 67, 75, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 65, 0, 0, 33, 0, 1];
+let resp = match udp_exchange(ctx, req, 4096) {
+    Some(r) if !r.is_empty() => r,
+    _ => { set_out(ctx, "iot-netbios-ns-5: no response"); return 0; }
+};
+text = clean(&String::from_utf8_lossy(&resp));
+set_out(ctx, &format!("iot-netbios-ns-5: unexpected reply ({} bytes)", resp.len()));
+0
 }

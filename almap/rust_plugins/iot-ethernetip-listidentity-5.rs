@@ -1,25 +1,17 @@
-/* iot-ethernetip-listidentity-5 - EtherNet/IP ListIdentity probe */
+/* iot-ethernetip-listidentity-5 - EtherNet/IP ListIdentity probe * Use only on networks you own or have permission to scan. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let req: [u8; 24] = [0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-    if !valid(ctx) {
-        return 1;
-    }
-    let resp = match udp_exchange(ctx, &req, 2048) {
-        Some(r) => r,
-        None => {
-            set_out(ctx, "iot-ethernetip-listidentity-5: no UDP reply");
-            return 0;
-        }
-    };
-    if resp.len() >= 2 && resp[0] == 0x63 {
-        set_out(ctx, &format!("iot-ethernetip-listidentity-5: expected reply seen ({} bytes)", resp.len()));
-    } else {
-        set_out(ctx, &format!("iot-ethernetip-listidentity-5: unexpected reply ({} bytes)", resp.len()));
-    }
-    0
+let text: String;
+let req = &[99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+let resp = match udp_exchange(ctx, req, 4096) {
+    Some(r) if !r.is_empty() => r,
+    _ => { set_out(ctx, "iot-ethernetip-listidentity-5: no response"); return 0; }
+};
+text = clean(&String::from_utf8_lossy(&resp));
+set_out(ctx, &format!("iot-ethernetip-listidentity-5: unexpected reply ({} bytes)", resp.len()));
+0
 }

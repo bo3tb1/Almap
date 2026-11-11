@@ -7,25 +7,21 @@ use arsenal::*;
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
     let users = ["admin", "root", "password", "admin", "root"];
     let passes = ["admin", "root", "password", "password", "password"];
-    if !valid(ctx) {
-        return 1;
-    }
     let mut s = match connect_ctx(ctx) {
         Some(s) => s,
-        None => {
-            set_out(ctx, "POP3 brute: no connection");
-            return 0;
-        }
+        None => { set_out(ctx, "POP3 brute: no connection"); return 0; }
     };
-    let mut found = 0;
+    let mut found = 0usize;
     for i in 0..5 {
-        if send_all(&mut s, format!("USER {}\r\n", users[i]).as_bytes()).is_err() {
+        let cmd = format!("USER {}\r\n", users[i]);
+        if send_all(&mut s, cmd.as_bytes()).is_err() {
             break;
         }
         if recv_line(&mut s, 512).is_empty() {
             break;
         }
-        if send_all(&mut s, format!("PASS {}\r\n", passes[i]).as_bytes()).is_err() {
+        let cmd = format!("PASS {}\r\n", passes[i]);
+        if send_all(&mut s, cmd.as_bytes()).is_err() {
             break;
         }
         let resp = recv_line(&mut s, 512);
@@ -33,8 +29,9 @@ pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
             break;
         }
         if resp.contains("+OK") {
-            let prefix = if found == 0 { "POP3 valid credentials: " } else { ", " };
-            append_out(ctx, &format!("{}{}:{}", prefix, users[i], passes[i]));
+            append_out(ctx, &format!("{}{}:{}",
+                if found == 0 { "POP3 valid credentials: " } else { ", " },
+                users[i], passes[i]));
             found += 1;
             break;
         }

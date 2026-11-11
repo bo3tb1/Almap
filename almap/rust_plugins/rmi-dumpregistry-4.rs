@@ -1,29 +1,31 @@
-/* rmi-dumpregistry-4 - Java RMI/JRMP handshake probe */
+/* rmi-dumpregistry-4 - Java RMI registry endpoint probe * Use only on networks you own or have permission to scan. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    const HS: [u8; 7] = [0x4a, 0x52, 0x4d, 0x49, 0x00, 0x02, 0x4b];
-    if !valid(ctx) {
-        return 1;
-    }
-    let resp = match connect_ctx(ctx) {
-        Some(mut s) => {
-            if send_all(&mut s, &HS).is_ok() {
-                recv_all(&mut s, 256)
-            } else {
-                Vec::new()
-            }
-        }
-        None => Vec::new(),
-    };
-    if resp.is_empty() {
-        set_out(ctx, "rmi-dumpregistry-4: no JRMP response");
-        return 0;
-    }
-    let suffix = if resp[0] == 0x4e { " (RMI registry live; verify)" } else { "" };
-    set_out(ctx, &format!("rmi-dumpregistry-4: JRMP ack=0x{:02x}{}", resp[0], suffix));
-    0
+let port = unsafe { (*ctx).port };
+let mut s = match connect_ctx(ctx) {
+    Some(s) => s,
+    None => { set_out(ctx, &format!("rmi-dumpregistry-4: TCP {} not reachable", port)); return 0; }
+};
+if send_all(&mut s, &[74, 82, 77, 73, 0, 2, 75]).is_err() {
+    set_out(ctx, "rmi-dumpregistry-4: send failed");
+    return 0;
+}
+let buf = recv_all(&mut s, 4096);
+if buf.is_empty() {
+    set_out(ctx, "rmi-dumpregistry-4: no response");
+    return 0;
+}
+let resp = clean(&String::from_utf8_lossy(&buf));
+let rb = &buf;
+let n = buf.len();
+if buf.len() > 0 && buf[0] == 78 {
+    set_out(ctx, "rmi-dumpregistry-4: no JRMP response");
+} else {
+    set_out(ctx, &format!("rmi-dumpregistry-4: JRMP ack=0x{:02x}{}", rb[0], if rb[0] == 0x4e { " (RMI registry live; verify)" } else { "" }));
+}
+0
 }

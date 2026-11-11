@@ -1,4 +1,4 @@
-/* ms-sql-brute-3 - five blank-password sa login attempts. */
+/* ms-sql-brute-3 - five blank-password sa login attempts */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
@@ -6,10 +6,6 @@ use arsenal::*;
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
     let mut found = false;
-
-    if !valid(ctx) {
-        return 1;
-    }
     for _ in 0..5 {
         let (rc, _msg) = mssql_empty_login(ctx);
         if rc == 0 {

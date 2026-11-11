@@ -8,15 +8,13 @@ pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
     let communities = ["public", "private"];
     let oids = ["1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.3.0"];
     let labels = ["sysDescr", "sysName", "sysUpTime"];
-    if !valid(ctx) {
-        return 1;
-    }
-    let mut found = 0;
+    let mut found = 0usize;
     for c in communities.iter() {
         for (i, oid) in oids.iter().enumerate() {
             if let Some(val) = snmp_get(ctx, c, oid) {
-                let prefix = if found == 0 { "SNMP info: " } else { "; " };
-                append_out(ctx, &format!("{}{}: {}", prefix, labels[i], val));
+                append_out(ctx, &format!("{}{}: {}",
+                    if found == 0 { "SNMP info: " } else { "; " },
+                    labels[i], val));
                 found += 1;
             }
         }

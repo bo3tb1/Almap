@@ -5,10 +5,19 @@ use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let resp = match http_request(ctx, "GET", "/", None, "", "", None, 8192) {
-        Some(r) if !r.is_empty() => r,
-        _ => return 0,
+    let mut s = match connect_ctx(ctx) {
+        Some(s) => s,
+        None => return 1,
     };
+    if send_all(&mut s, b"GET / HTTP/1.0\r\n\r\n").is_err() {
+        return 1;
+    }
+    let raw = recv_all(&mut s, 8192);
+    drop(s);
+    if raw.is_empty() {
+        return 0;
+    }
+    let resp = String::from_utf8_lossy(&raw).into_owned();
     let server = http_header(&resp, "Server").unwrap_or_default();
     let lower = resp.to_ascii_lowercase();
     let mut title = String::new();
@@ -16,8 +25,12 @@ pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
     if let Some(open) = lower.find("<title>") {
         let start = open + 7;
         if let Some(rel) = lower[start..].find("</title>") {
-            title = resp[start..start + rel].to_string();
-            title = clean(&title);
+            let raw_title = &resp[start..start + rel];
+            title = raw_title
+                .chars()
+                .map(|c| if (c as u32) < 32 { '.' } else { c })
+                .collect();
+            title = title.trim().to_string();
             have_title = true;
         }
     }

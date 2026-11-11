@@ -1,4 +1,4 @@
-/* http-svn-enum-3 - Subversion metadata probe */
+/* http-svn-enum-3 - detect exposed Subversion metadata. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
@@ -10,21 +10,33 @@ pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
         "/.svn/wc.db",
         "/.svn/all-wcprops",
     ];
+    let mut out = String::new();
     let mut found = 0usize;
-    for p in paths.iter() {
-        let resp = match http_request(ctx, "GET", p, None, "", "", None, 8192) {
+
+    if !valid(ctx) {
+        return 1;
+    }
+    for path in paths.iter() {
+        let resp = match http_request(ctx, "GET", path, None, "", "", None, 8192) {
             Some(r) if !r.is_empty() => r,
             _ => continue,
         };
         let code = http_status(&resp);
         if code != 404 && code != 400 {
-            append_out(ctx, &format!("{}{} [{}]",
-                if found == 0 { "svn: " } else { ", " }, p, code));
+            if found == 0 {
+                out.push_str("svn: ");
+            } else {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("{} [{}]", path, code));
             found += 1;
         }
     }
     if found == 0 {
         set_out(ctx, "svn: no matching paths");
+    } else {
+        out.push_str("");
+        set_out(ctx, &out);
     }
     0
 }

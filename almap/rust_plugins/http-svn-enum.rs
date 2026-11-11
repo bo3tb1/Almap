@@ -1,4 +1,4 @@
-/* http-svn-enum - Subversion metadata exposure probe */
+/* http-svn-enum - detect exposed Subversion metadata */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
@@ -9,9 +9,11 @@ pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
         "/.svn/entries", "/.svn/wc.db", "/.svn/all-wcprops",
         "/.svn/prop-base/", "/.svn/text-base/", "/.svn/format",
     ];
+    let mut out = String::new();
     let mut found = 0usize;
-    for p in paths.iter() {
-        let resp = match http_request(ctx, "GET", p, None, "", "", None, 8192) {
+    if !valid(ctx) { return 1; }
+    for path in paths.iter() {
+        let resp = match http_request(ctx, "GET", path, None, "", "", None, 8192) {
             Some(r) if !r.is_empty() => r,
             _ => continue,
         };
@@ -20,13 +22,11 @@ pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
             && (body.contains("svn") || body.contains("dir")
                 || body.contains("SQLite") || body.contains("12"))
         {
-            append_out(ctx, &format!("{}{}",
-                if found == 0 { "svn exposed: " } else { ", " }, p));
+            if found == 0 { out.push_str("svn exposed: "); } else { out.push_str(", "); }
+            out.push_str(path);
             found += 1;
         }
     }
-    if found == 0 {
-        set_out(ctx, "svn exposed: no");
-    }
+    if found == 0 { set_out(ctx, "svn exposed: no"); } else { set_out(ctx, &out); }
     0
 }

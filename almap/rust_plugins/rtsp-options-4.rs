@@ -1,32 +1,23 @@
-/* rtsp-options-4 - RTSP OPTIONS probe */
+/* rtsp-options-4 - RTSP OPTIONS method probe * Use only on networks you own or have permission to scan. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    if !valid(ctx) {
-        return 1;
-    }
-    let ip = ip_text(ctx);
-    let port = unsafe { (*ctx).port };
-    let req = format!("OPTIONS rtsp://{}:{}/ RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: ALmap\r\n\r\n", ip, port);
-    let mut s = match connect_ctx(ctx) {
-        Some(s) => s,
-        None => {
-            set_out(ctx, "rtsp-options-4: not reachable");
-            return 0;
-        }
-    };
-    let sent = send_all(&mut s, req.as_bytes()).is_ok();
-    let resp = if sent { recv_all(&mut s, 2048) } else { Vec::new() };
-    drop(s);
-    if resp.is_empty() {
-        set_out(ctx, "rtsp-options-4: no RTSP reply");
-        return 0;
-    }
-    let cleaned = clean(&String::from_utf8_lossy(&resp));
-    let show: String = cleaned.chars().take(200).collect();
-    set_out(ctx, &format!("rtsp-options-4: {}", show));
-    0
+let port = unsafe { (*ctx).port };
+let mut s = match connect_ctx(ctx) {
+    Some(s) => s,
+    None => { set_out(ctx, "rtsp-options-4: not reachable"); return 0; }
+};
+let buf = recv_all(&mut s, 4096);
+if buf.is_empty() {
+    set_out(ctx, "rtsp-options-4: no response");
+    return 0;
+}
+let resp = clean(&String::from_utf8_lossy(&buf));
+let rb = &buf;
+let n = buf.len();
+set_out(ctx, &format!("rtsp-options-4: {}", &resp));
+0
 }

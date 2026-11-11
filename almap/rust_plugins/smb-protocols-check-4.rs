@@ -1,26 +1,19 @@
-/* smb-protocols-check-4 - enumerate supported SMB dialects (posture). */
+/* smb-protocols-check-4 - enumerate supported SMB dialects (posture). * Use only on networks you own or have permission to scan. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let mut out = String::new();
-
-    if !valid(ctx) {
-        return 1;
-    }
-    match smb1_negotiate(ctx) {
-        Some(resp) => out.push_str(&format!("SMBv1: {}", smb1_dialect_name(smb1_dialect(&resp)))),
-        None => out.push_str("SMBv1: no"),
-    }
-    match smb2_negotiate(ctx) {
-        Some(resp) => out.push_str(&format!(
-            ", SMB2/3: {}",
-            smb2_dialect_name(smb2_dialect(&resp))
-        )),
-        None => out.push_str(", SMB2/3: no"),
-    }
-    set_out(ctx, &out);
+    let d1 = match smb1_negotiate(ctx) {
+        Some(r) if !r.is_empty() => smb1_dialect(&r),
+        _ => 0xFFFF,
+    };
+    let d2 = match smb2_negotiate(ctx) {
+        Some(r) if !r.is_empty() => smb2_dialect(&r),
+        _ => 0xFFFF,
+    };
+    append_out(ctx, &format!("SMBv1: {}", if d1 != 0xFFFF { smb1_dialect_name(d1) } else { "no" }));
+    append_out(ctx, &format!(", SMB2/3: {}", if d2 != 0xFFFF { smb2_dialect_name(d2) } else { "no" }));
     0
 }

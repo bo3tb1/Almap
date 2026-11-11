@@ -5,32 +5,24 @@ use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let mut dialect: u32 = 0xFFFF;
-
-    if !valid(ctx) {
-        return 1;
-    }
-    if let Some(resp) = smb1_negotiate(ctx) {
-        dialect = smb1_dialect(&resp);
-    }
+    let d1 = match smb1_negotiate(ctx) {
+        Some(r) if !r.is_empty() => smb1_dialect(&r),
+        _ => 0xFFFF,
+    };
     let (os, lan) = match smb1_open_session(ctx) {
-        Some((_stream, _uid, os, lan)) => (os, lan),
+        Some((s, _uid, os, lan)) => { drop(s); (os, lan) },
         None => (String::new(), String::new()),
     };
-    if os.is_empty() && lan.is_empty() && dialect == 0xFFFF {
+    if os.is_empty() && lan.is_empty() && d1 == 0xFFFF {
         set_out(ctx, "SMB OS: not detected");
         return 0;
     }
-    let mut out = format!(
-        "SMB OS: {}",
-        if os.is_empty() { "unknown" } else { os.as_str() }
-    );
+    set_out(ctx, &format!("SMB OS: {}", if !os.is_empty() { os.as_str() } else { "unknown" }));
     if !lan.is_empty() {
-        out.push_str(&format!(" LAN Manager: {}", lan));
+        append_out(ctx, &format!(" LAN Manager: {}", lan));
     }
-    if dialect != 0xFFFF {
-        out.push_str(&format!(" dialect: {}", smb1_dialect_name(dialect)));
+    if d1 != 0xFFFF {
+        append_out(ctx, &format!(" dialect: {}", smb1_dialect_name(d1)));
     }
-    set_out(ctx, &out);
     0
 }

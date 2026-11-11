@@ -1,4 +1,4 @@
-/* pgsql-auth-check-4 - PostgreSQL default-credential check */
+/* pgsql-auth-check-4 - PostgreSQL default-credential check (5-entry dict) */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
@@ -6,13 +6,10 @@ use arsenal::*;
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
     let words = ["admin", "password", "root", "test", "guest"];
-    if !valid(ctx) {
-        return 1;
-    }
-    for w in words.iter() {
-        let (rc, _m) = pg_login(ctx, "postgres", w);
+    for word in words.iter() {
+        let (rc, _msg) = pg_login(ctx, "postgres", word);
         if rc == 0 {
-            set_out(ctx, &format!("pgsql-auth-check: postgres:{} ACCEPTED (verify)", w));
+            set_out(ctx, &format!("pgsql-auth-check: postgres:{} ACCEPTED (verify)", word));
             return 0;
         }
     }

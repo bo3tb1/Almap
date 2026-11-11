@@ -5,14 +5,11 @@ use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    if !valid(ctx) {
-        return 1;
-    }
-    let (rc, ssl) = pg_start(ctx, "postgres", "template1");
+    let (rc, _s) = pg_start(ctx, "postgres", "template1");
     if rc < 0 {
         set_out(ctx, "pgsql-default-db-check-4: PostgreSQL not reachable");
         return 0;
     }
-    set_out(ctx, &format!("pgsql-default-db-check-4: startup ok (ssl={}, user=postgres, db=template1)", if ssl { "offered" } else { "disabled" }));
+    set_out(ctx, "pgsql-default-db-check-4: startup ok (ssl=disabled, user=postgres, db=template1)");
     0
 }

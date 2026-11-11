@@ -1,13 +1,10 @@
-/* ssl-poodle-2 - SSLv3 CBC POODLE probe */
+/* ssl-poodle-2 - SSLv3 CBC POODLE check (CVE-2014-3566) */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    if !valid(ctx) {
-        return 1;
-    }
     let (rc, _ver, cipher) = tls_probe(ctx, 0x0300, &TLS_CBC_CIPHERS, false);
     if rc == 1 {
         set_out(ctx, &format!("VULNERABLE: SSLv3 CBC POODLE ({})", tls_cipher_name(cipher)));

@@ -5,8 +5,13 @@ use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let paths = ["/wp-json/wp/v2/users", "/?author=1", "/author/admin/"];
-    let mut found = 0;
+    let paths = [
+        "/wp-json/wp/v2/users",
+        "/?author=1",
+        "/author/admin/",
+    ];
+    let mut out = String::new();
+    let mut found = 0usize;
 
     if !valid(ctx) {
         return 1;
@@ -16,18 +21,22 @@ pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
             Some(r) if !r.is_empty() => r,
             _ => continue,
         };
-        if http_status(&resp) < 400
-            && (contains_ci(&resp, "\"slug\"")
-                || contains_ci(&resp, "author")
-                || contains_ci(&resp, "admin"))
-        {
-            let prefix = if found == 0 { "WordPress users: " } else { ", " };
-            append_out(ctx, &format!("{}{}", prefix, path));
+        let code = http_status(&resp);
+        if code < 400 && (contains_ci(&resp, "\"slug\"") || contains_ci(&resp, "author") || contains_ci(&resp, "admin")) {
+            if found == 0 {
+                out.push_str("WordPress users: ");
+            } else {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("{}", path));
             found += 1;
         }
     }
     if found == 0 {
         set_out(ctx, "WordPress users: no disclosure");
+    } else {
+        out.push_str("");
+        set_out(ctx, &out);
     }
     0
 }

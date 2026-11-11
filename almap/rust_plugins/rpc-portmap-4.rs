@@ -1,29 +1,27 @@
-/* rpc-portmap-4 - ONC-RPC portmapper call */
+/* rpc-portmap-4 - ONC-RPC portmapper NULL call * Use only on networks you own or have permission to scan. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    const CALL: [u8; 44] = [0x80, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0x86, 0xa0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-    if !valid(ctx) {
-        return 1;
-    }
-    let resp = match connect_ctx(ctx) {
-        Some(mut s) => {
-            if send_all(&mut s, &CALL).is_ok() {
-                recv_all(&mut s, 1024)
-            } else {
-                Vec::new()
-            }
-        }
-        None => Vec::new(),
-    };
-    if resp.len() < 12 {
-        let port = unsafe { (*ctx).port };
-        set_out(ctx, &format!("rpc-portmap: no RPC reply on port {}", port));
-        return 0;
-    }
-    set_out(ctx, &format!("rpc-portmap: RPC reply {} bytes (portmapper responding)", resp.len()));
-    0
+let port = unsafe { (*ctx).port };
+let mut s = match connect_ctx(ctx) {
+    Some(s) => s,
+    None => { set_out(ctx, &format!("rpc-portmap-4: TCP {} not reachable", port)); return 0; }
+};
+if send_all(&mut s, &[128, 0, 0, 40, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 134, 160, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err() {
+    set_out(ctx, "rpc-portmap-4: send failed");
+    return 0;
+}
+let buf = recv_all(&mut s, 4096);
+if buf.is_empty() {
+    set_out(ctx, "rpc-portmap-4: no response");
+    return 0;
+}
+let resp = clean(&String::from_utf8_lossy(&buf));
+let rb = &buf;
+let n = buf.len();
+set_out(ctx, &format!("rpc-portmap: RPC reply {} bytes (portmapper responding)", resp.len()));
+0
 }

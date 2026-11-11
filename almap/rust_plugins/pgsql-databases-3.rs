@@ -1,22 +1,14 @@
-/* pgsql-databases-3 - service reachability probe */
+/* pgsql-databases-3 - PostgreSQL database enumeration probe. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    if !valid(ctx) {
-        return 1;
-    }
-    let s = match connect_ctx(ctx) {
-        Some(s) => s,
-        None => {
-            set_out(ctx, "PostgreSQL databases: not reachable");
-            return 0;
-        }
-    };
-    drop(s);
-    let port = unsafe { (*ctx).port };
-    set_out(ctx, &format!("PostgreSQL databases: service reachable on port {}", port));
-    0
+let port = unsafe { (*ctx).port };
+match connect_ctx(ctx) {
+    Some(_) => set_out(ctx, &format!("PostgreSQL databases: service reachable on port {}", port)),
+    None => set_out(ctx, "PostgreSQL databases: not reachable"),
+}
+0
 }

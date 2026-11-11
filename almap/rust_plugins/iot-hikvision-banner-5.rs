@@ -1,28 +1,23 @@
-/* iot-hikvision-banner-5 - Hikvision SDK port banner probe */
+/* iot-hikvision-banner-5 - Hikvision SDK port banner probe * Use only on networks you own or have permission to scan. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    if !valid(ctx) {
-        return 1;
-    }
-    let mut s = match connect_ctx(ctx) {
-        Some(s) => s,
-        None => {
-            set_out(ctx, &format!("iot-hikvision-banner-5: TCP {} not reachable", unsafe { (*ctx).port }));
-            return 0;
-        }
-    };
-    let buf = recv_all(&mut s, 2048);
-    drop(s);
-    if buf.is_empty() {
-        set_out(ctx, "iot-hikvision-banner-5: no banner");
-        return 0;
-    }
-    let text = clean(&String::from_utf8_lossy(&buf));
-    let shown: String = text.chars().take(200).collect();
-    set_out(ctx, &format!("iot-hikvision-banner-5: {}", shown));
-    0
+let port = unsafe { (*ctx).port };
+let mut s = match connect_ctx(ctx) {
+    Some(s) => s,
+    None => { set_out(ctx, &format!("iot-hikvision-banner-5: TCP {} not reachable", port)); return 0; }
+};
+let buf = recv_all(&mut s, 4096);
+if buf.is_empty() {
+    set_out(ctx, "iot-hikvision-banner-5: no banner");
+    return 0;
+}
+let resp = clean(&String::from_utf8_lossy(&buf));
+let rb = &buf;
+let n = buf.len();
+set_out(ctx, &format!("iot-hikvision-banner-5: {}", &resp));
+0
 }

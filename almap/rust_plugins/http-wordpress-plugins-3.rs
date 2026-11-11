@@ -10,7 +10,8 @@ pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
         "/wp-content/plugins/hello.php",
         "/wp-content/plugins/woocommerce/readme.txt",
     ];
-    let mut found = 0;
+    let mut out = String::new();
+    let mut found = 0usize;
 
     if !valid(ctx) {
         return 1;
@@ -22,13 +23,20 @@ pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
         };
         let code = http_status(&resp);
         if code != 404 && code != 400 {
-            let prefix = if found == 0 { "WordPress plugins: " } else { ", " };
-            append_out(ctx, &format!("{}{} [{}]", prefix, path, code));
+            if found == 0 {
+                out.push_str("WordPress plugins: ");
+            } else {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("{} [{}]", path, code));
             found += 1;
         }
     }
     if found == 0 {
         set_out(ctx, "WordPress plugins: no matching paths");
+    } else {
+        out.push_str("");
+        set_out(ctx, &out);
     }
     0
 }

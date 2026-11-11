@@ -1,24 +1,17 @@
-/* upnp-ssdp-4 - UPnP SSDP M-SEARCH discovery (UDP) */
+/* upnp-ssdp-4 - UPnP SSDP M-SEARCH discovery (UDP) * Use only on networks you own or have permission to scan. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    const MSEARCH: &[u8] = b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n";
-    if !valid(ctx) {
-        return 1;
-    }
-    let resp = match udp_exchange(ctx, MSEARCH, 2048) {
-        Some(r) if !r.is_empty() => r,
-        _ => {
-            let port = unsafe { (*ctx).port };
-            set_out(ctx, &format!("upnp-ssdp: no SSDP reply on UDP {}", port));
-            return 0;
-        }
-    };
-    let cleaned = clean(&String::from_utf8_lossy(&resp));
-    let show: String = cleaned.chars().take(220).collect();
-    set_out(ctx, &format!("upnp-ssdp: {}", show));
-    0
+let text: String;
+let req = &[77, 45, 83, 69, 65, 82, 67, 72, 32, 42, 32, 72, 84, 84, 80, 47, 49, 46, 49, 13, 10, 72, 79, 83, 84, 58, 32, 50, 51, 57, 46, 50, 53, 53, 46, 50, 53, 53, 46, 50, 53, 48, 58, 49, 57, 48, 48, 13, 10];
+let resp = match udp_exchange(ctx, req, 4096) {
+    Some(r) if !r.is_empty() => r,
+    _ => { set_out(ctx, "upnp-ssdp-4: no response"); return 0; }
+};
+text = clean(&String::from_utf8_lossy(&resp));
+set_out(ctx, &format!("upnp-ssdp: {}", &text));
+0
 }

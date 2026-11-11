@@ -5,18 +5,10 @@ use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    if !valid(ctx) {
-        return 1;
-    }
-    let port = unsafe { (*ctx).port };
-    let s = match connect_ctx(ctx) {
-        Some(s) => s,
-        None => {
-            set_out(ctx, "Oracle users: not reachable");
-            return 0;
-        }
-    };
-    drop(s);
-    set_out(ctx, &format!("Oracle users: service reachable on port {}", port));
-    0
+let port = unsafe { (*ctx).port };
+match connect_ctx(ctx) {
+    Some(_) => set_out(ctx, &format!("Oracle users: service reachable on port {}", port)),
+    None => set_out(ctx, "Oracle users: not reachable"),
+}
+0
 }

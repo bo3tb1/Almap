@@ -1,29 +1,23 @@
-/* vnc-brute - small fixed dictionary check for VNC authentication. */
+/* vnc-brute - small fixed dictionary check for VNC authentication */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let mut found = 0;
+    let words = ["admin", "root", "password", "123456", "vnc", "test", "guest",
+                 "letmein", "secret", "default"];
+    let mut found = 0usize;
     let mut noauth = false;
-
-    if !valid(ctx) {
-        return 1;
-    }
-    for i in 0..10 {
-        let rc = vnc_try_password(ctx, BRUTE_WORDS[i]);
+    for pass in words.iter() {
+        let (rc, _sectype) = vnc_try_password(ctx, pass);
         if rc == 2 {
             noauth = true;
             break;
         }
         if rc == 1 {
-            let prefix = if found == 0 {
-                "VNC valid password: "
-            } else {
-                ", "
-            };
-            append_out(ctx, &format!("{}{}", prefix, BRUTE_WORDS[i]));
+            append_out(ctx, &format!("{}{}",
+                if found == 0 { "VNC valid password: " } else { ", " }, pass));
             found += 1;
             break;
         }

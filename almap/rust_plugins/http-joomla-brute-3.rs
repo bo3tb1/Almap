@@ -1,4 +1,4 @@
-/* http-joomla-brute-3 - five fixed Joomla admin logins */
+/* http-joomla-brute-3 - five fixed Joomla administrator logins */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;

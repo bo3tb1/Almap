@@ -1,35 +1,31 @@
-/* iot-opcua-hello-5 - OPC UA TCP HEL handshake probe */
+/* iot-opcua-hello-5 - OPC UA TCP HEL handshake probe * Use only on networks you own or have permission to scan. */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let req: [u8; 32] = [0x48, 0x45, 0x4c, 0x46, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-    if !valid(ctx) {
-        return 1;
-    }
-    let mut s = match connect_ctx(ctx) {
-        Some(s) => s,
-        None => {
-            set_out(ctx, &format!("iot-opcua-hello-5: TCP {} not reachable", unsafe { (*ctx).port }));
-            return 0;
-        }
-    };
-    if send_all(&mut s, &req).is_err() {
-        set_out(ctx, "iot-opcua-hello-5: send failed");
-        return 0;
-    }
-    let buf = recv_all(&mut s, 4096);
-    drop(s);
-    if buf.is_empty() {
-        set_out(ctx, "iot-opcua-hello-5: no response");
-        return 0;
-    }
-    if buf.len() >= 4 && &buf[..4] == b"ACKF" {
-        set_out(ctx, &format!("iot-opcua-hello-5: expected reply seen ({} bytes)", buf.len()));
-    } else {
-        set_out(ctx, &format!("iot-opcua-hello-5: unexpected reply ({} bytes)", buf.len()));
-    }
-    0
+let port = unsafe { (*ctx).port };
+let mut s = match connect_ctx(ctx) {
+    Some(s) => s,
+    None => { set_out(ctx, &format!("iot-opcua-hello-5: TCP {} not reachable", port)); return 0; }
+};
+if send_all(&mut s, &[72, 69, 76, 70, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err() {
+    set_out(ctx, "iot-opcua-hello-5: send failed");
+    return 0;
+}
+let buf = recv_all(&mut s, 4096);
+if buf.is_empty() {
+    set_out(ctx, "iot-opcua-hello-5: no response");
+    return 0;
+}
+let resp = clean(&String::from_utf8_lossy(&buf));
+let rb = &buf;
+let n = buf.len();
+if contains_ci(&resp, "ACKF") {
+    set_out(ctx, &format!("iot-opcua-hello-5: expected reply seen ({} bytes)", resp.len()));
+} else {
+    set_out(ctx, &format!("iot-opcua-hello-5: unexpected reply ({} bytes)", resp.len()));
+}
+0
 }

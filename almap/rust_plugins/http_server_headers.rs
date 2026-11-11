@@ -1,16 +1,23 @@
-/* http_server_headers - Server header disclosure check */
+/* http_server_headers - * plugins/http_server_headers.c - NSE http-server-header analog. * * Build: * gcc -shared -fPIC -o plugins/http_server_headers.so plugins/ht */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let resp = match http_request(ctx, "HEAD", "/", None, "", "", None, 3072) {
-        Some(r) if !r.is_empty() => r,
-        _ => return 0,
-    };
-    if let Some(server) = http_header(&resp, "Server") {
-        set_out(ctx, &format!("Server: {}", server));
-    }
-    0
+let port = unsafe { (*ctx).port };
+let mut s = match connect_ctx(ctx) {
+    Some(s) => s,
+    None => { set_out(ctx, &format!("http_server_headers: TCP {} not reachable", port)); return 0; }
+};
+let buf = recv_all(&mut s, 4096);
+if buf.is_empty() {
+    set_out(ctx, "http_server_headers: no response");
+    return 0;
+}
+let resp = clean(&String::from_utf8_lossy(&buf));
+let rb = &buf;
+let n = buf.len();
+set_out(ctx, &format!("http_server_headers: {}", &resp.chars().take(220).collect::<String>()));
+0
 }

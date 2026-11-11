@@ -1,18 +1,23 @@
-/* http_robots - robots.txt first-five-lines dump */
+/* http_robots - * plugins/http_robots.c - NSE http-robots.txt analog. * * Build: * gcc -shared -fPIC -o plugins/http_robots.so plugins/http_robots.c * Run:  */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let resp = match http_request(ctx, "GET", "/robots.txt", None, "", "", None, 3584) {
-        Some(r) if !r.is_empty() => r,
-        _ => return 0,
-    };
-    let body = http_body(&resp).trim_start_matches(|c| c == '\r' || c == '\n');
-    let lines: Vec<&str> = body.lines().take(5).collect();
-    if !lines.is_empty() {
-        set_out(ctx, &lines.join("\n"));
-    }
-    0
+let port = unsafe { (*ctx).port };
+let mut s = match connect_ctx(ctx) {
+    Some(s) => s,
+    None => { set_out(ctx, &format!("http_robots: TCP {} not reachable", port)); return 0; }
+};
+let buf = recv_all(&mut s, 4096);
+if buf.is_empty() {
+    set_out(ctx, "http_robots: no response");
+    return 0;
+}
+let resp = clean(&String::from_utf8_lossy(&buf));
+let rb = &buf;
+let n = buf.len();
+set_out(ctx, &format!("http_robots: {}", &resp.chars().take(220).collect::<String>()));
+0
 }

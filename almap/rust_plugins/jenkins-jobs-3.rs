@@ -5,27 +5,43 @@ use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let paths = ["/api/json?tree=jobs[name]", "/api/json", "/view/all/"];
-    let needles = ["jobs", "Jenkins", "Jenkins"];
-    let mut found = 0;
+    let paths = [
+        "/api/json?tree=jobs[name]",
+        "/api/json",
+        "/view/all/",
+    ];
+    let needles = [
+            "jobs",
+            "Jenkins",
+            "Jenkins",
+    ];
+    let mut out = String::new();
+    let mut found = 0usize;
 
     if !valid(ctx) {
         return 1;
     }
-    for (i, path) in paths.iter().enumerate() {
+    for (path, needle) in paths.iter().zip(needles.iter()) {
         let resp = match http_request(ctx, "GET", path, None, "", "", None, 8192) {
             Some(r) if !r.is_empty() => r,
             _ => continue,
         };
         let code = http_status(&resp);
-        if code < 400 && contains_ci(http_body(&resp), needles[i]) {
-            let prefix = if found == 0 { "Jenkins jobs: " } else { ", " };
-            append_out(ctx, &format!("{}{} [{}]", prefix, path, code));
+        if code < 400 && contains_ci(http_body(&resp), needle) {
+            if found == 0 {
+                out.push_str("Jenkins jobs: ");
+            } else {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("{} [{}]", path, code));
             found += 1;
         }
     }
     if found == 0 {
         set_out(ctx, "Jenkins jobs: no matching paths");
+    } else {
+        out.push_str("");
+        set_out(ctx, &out);
     }
     0
 }

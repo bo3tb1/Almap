@@ -1,28 +1,17 @@
-/* ntp_version - NSE ntp-info analog. */
+/* ntp_version - * plugins/ntp_version.c - NSE ntp-info analog. * * Build: * gcc -shared -fPIC -o plugins/ntp_version.so plugins/ntp_version.c * Run: * ./alm */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    let mut req = [0u8; 48];
-    req[0] = 0x23; /* LI=0, version=4, mode=3 (client) */
-
-    if !valid(ctx) {
-        return 1;
-    }
-    let resp = match udp_exchange(ctx, &req, 512) {
-        Some(r) => r,
-        None => return 0,
-    };
-    if resp.len() < 2 {
-        return 0;
-    }
-    let version = (resp[0] >> 3) & 7;
-    let stratum = resp[1];
-    set_out(
-        ctx,
-        &format!("NTP version:{} stratum:{}", version, stratum),
-    );
-    0
+let text: String;
+let req = "ntp_version".as_bytes();
+let resp = match udp_exchange(ctx, req, 4096) {
+    Some(r) if !r.is_empty() => r,
+    _ => { set_out(ctx, "ntp_version: no response"); return 0; }
+};
+text = clean(&String::from_utf8_lossy(&resp));
+set_out(ctx, &format!("ntp_version: {}", &text[..text.len().min(220)]));
+0
 }

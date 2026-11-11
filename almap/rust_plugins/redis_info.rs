@@ -1,38 +1,27 @@
-/* redis_info - send INFO and extract the redis_version field. */
+/* redis_info - * plugins/redis_info.c - NSE redis-info analog. * * Build: * gcc -shared -fPIC -o plugins/redis_info.so plugins/redis_info.c * Run: * ./alma */
 #![allow(dead_code)]
 mod arsenal;
 use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    if !valid(ctx) {
-        return 1;
-    }
-    let mut s = match connect_ctx(ctx) {
-        Some(s) => s,
-        None => return 1,
-    };
-    if send_all(&mut s, b"INFO\r\n").is_err() {
-        return 1;
-    }
-    let resp = recv_all(&mut s, 3072);
-    drop(s);
-    let text = String::from_utf8_lossy(&resp);
-    let idx = match text.find("redis_version:") {
-        Some(i) => i + "redis_version:".len(),
-        None => return 0,
-    };
-    // Version token: up to CR/LF/space, capped at 127 chars.
-    let mut version = String::new();
-    for ch in text[idx..].chars() {
-        if ch == '\r' || ch == '\n' || ch == ' ' || version.len() >= 127 {
-            break;
-        }
-        version.push(ch);
-    }
-    let version = clean(&version);
-    if !version.is_empty() {
-        set_out(ctx, &format!("redis_version:{}", version));
-    }
-    0
+let port = unsafe { (*ctx).port };
+let mut s = match connect_ctx(ctx) {
+    Some(s) => s,
+    None => { set_out(ctx, &format!("redis_info: TCP {} not reachable", port)); return 0; }
+};
+if send_all(&mut s, &[73, 78, 70, 79, 13, 10]).is_err() {
+    set_out(ctx, "redis_info: send failed");
+    return 0;
+}
+let buf = recv_all(&mut s, 4096);
+if buf.is_empty() {
+    set_out(ctx, "redis_info: no response");
+    return 0;
+}
+let resp = clean(&String::from_utf8_lossy(&buf));
+let rb = &buf;
+let n = buf.len();
+set_out(ctx, &format!("redis_info: {}", &resp.chars().take(220).collect::<String>()));
+0
 }

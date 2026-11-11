@@ -5,17 +5,15 @@ use arsenal::*;
 
 #[no_mangle]
 pub extern "C" fn almap_script_run(ctx: *mut AlScriptContext) -> i32 {
-    if !valid(ctx) {
-        return 1;
-    }
-    let (stream, _uid, _os, _lan) = match smb1_open_session(ctx) {
-        Some(v) => v,
-        None => {
-            set_out(ctx, "SMB processes: null session denied");
-            return 0;
-        }
+    let (os, ok) = match smb1_open_session(ctx) {
+        Some((s, _uid, os, _lan)) => { drop(s); (os, true) },
+        None => (String::new(), false),
     };
-    drop(stream);
-    set_out(ctx, "SMB processes: null session accepted; full enumeration requires credentials");
+    let _ = &os;
+    if ok {
+        set_out(ctx, "SMB processes: null session accepted; full enumeration requires credentials");
+    } else {
+        set_out(ctx, "SMB processes: null session denied");
+    }
     0
 }
